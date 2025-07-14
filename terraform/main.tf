@@ -5,27 +5,16 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.0"
-    }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.0"
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.0"
     }
   }
 }
 
+
 provider "aws" {
   region = var.aws_region
-  
-  default_tags {
-    tags = {
-      Project     = var.project_name
-      Environment = var.environment
-      ManagedBy   = "terraform"
-    }
-  }
 }
 
 # Data sources
@@ -35,7 +24,17 @@ data "aws_availability_zones" "available" {
 
 data "aws_caller_identity" "current" {}
 
-# VPC and Networking
+# Local values
+locals {
+  cluster_name = "${var.project_name}-cluster"
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+# VPC Module
 module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
@@ -54,93 +53,80 @@ module "vpc" {
 
   public_subnet_tags = {
     "kubernetes.io/role/elb" = "1"
-    "kubernetes.io/cluster/${var.project_name}-cluster" = "owned"
+    "kubernetes.io/cluster/${local.cluster_name}" = "owned"
   }
 
   private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = "1"
-    "kubernetes.io/cluster/${var.project_name}-cluster" = "owned"
+    "kubernetes.io/cluster/${local.cluster_name}" = "owned"
   }
+
+  tags = local.common_tags
 }
 
 # EKS Cluster
 module "eks" {
-  source = "terraform-aws-modules/eks/aws"
+  source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
-  cluster_name    = "${var.project_name}-cluster"
+  cluster_name    = local.cluster_name
   cluster_version = var.kubernetes_version
 
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  vpc_id                         = module.vpc.vpc_id
+  subnet_ids                     = module.vpc.private_subnets
+  cluster_endpoint_public_access = true
 
-  # Cluster endpoint configuration
-  cluster_endpoint_public_access  = true
-  cluster_endpoint_private_access = true
-  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
-
-  # Cluster add-ons
-  cluster_addons = {
-    coredns = {
-      most_recent = true
-    }
-    kube-proxy = {
-      most_recent = true
-    }
-    vpc-cni = {
-      most_recent = true
-    }
-    aws-ebs-csi-driver = {
-      most_recent = true
-    }
-  }
+  # Use shorter names and disable name prefixes to avoid length issues
+  iam_role_name            = "${var.project_name}-cluster-role"
+  iam_role_use_name_prefix = false
 
   # EKS Managed Node Groups
   eks_managed_node_groups = {
-    document_processor = {
-      name = "${var.project_name}-workers"
-      
+    main = {
+      name           = "${var.project_name}-workers"
       instance_types = ["t3.medium"]
-      capacity_type  = "ON_DEMAND"
       
-      min_size     = 2
-      max_size     = 10
-      desired_size = 3
+      min_size     = 1
+      max_size     = 3
+      desired_size = 2
 
-      ami_type = "AL2_x86_64"
-      
-      # Disk configuration
-      disk_size = 50
-      
-      # Remote access
-      remote_access = {
-        ec2_ssh_key = var.key_pair_name
-      }
+      # Use shorter names and disable name prefixes
+      iam_role_name            = "${var.project_name}-node-role"
+      iam_role_use_name_prefix = false
 
-      # Labels
       labels = {
         Environment = var.environment
-        Application = "document-processor"
+        NodeGroup   = "main"
       }
 
-      # Taints
-      taints = []
+      tags = local.common_tags
     }
   }
 
-  # Access entries for additional users/roles
+  # Cluster access entry
   access_entries = {
-    # Additional entries can be added here if needed
+    admin = {
+      kubernetes_groups = []
+      principal_arn     = data.aws_caller_identity.current.arn
+
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
   }
+
+  tags = local.common_tags
 }
 
-# S3 Bucket for documents
+# S3 Bucket for document storage
 resource "aws_s3_bucket" "documents" {
-  bucket = "${var.project_name}-documents-${random_id.bucket_suffix.hex}"
-}
-
-resource "random_id" "bucket_suffix" {
-  byte_length = 4
+  bucket = "${var.project_name}-documents"
+  tags   = local.common_tags
 }
 
 resource "aws_s3_bucket_versioning" "documents" {
@@ -150,12 +136,14 @@ resource "aws_s3_bucket_versioning" "documents" {
   }
 }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "documents" {
+resource "aws_s3_bucket_encryption" "documents" {
   bucket = aws_s3_bucket.documents.id
 
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
     }
   }
 }
@@ -169,14 +157,14 @@ resource "aws_s3_bucket_public_access_block" "documents" {
   restrict_public_buckets = true
 }
 
-# DynamoDB Table
-resource "aws_dynamodb_table" "document_results" {
+# DynamoDB table for results
+resource "aws_dynamodb_table" "results" {
   name           = "${var.project_name}-results"
   billing_mode   = "PAY_PER_REQUEST"
-  hash_key       = "document_id"
+  hash_key       = "id"
 
   attribute {
-    name = "document_id"
+    name = "id"
     type = "S"
   }
 
@@ -186,8 +174,8 @@ resource "aws_dynamodb_table" "document_results" {
   }
 
   global_secondary_index {
-    name            = "status-index"
-    hash_key        = "status"
+    name     = "status-index"
+    hash_key = "status"
     projection_type = "ALL"
   }
 
@@ -195,81 +183,7 @@ resource "aws_dynamodb_table" "document_results" {
     enabled = true
   }
 
-  point_in_time_recovery {
-    enabled = true
-  }
-
-  tags = {
-    Name = "${var.project_name}-results"
-  }
-}
-
-# IAM Role for document processor pods
-resource "aws_iam_role" "document_processor_role" {
-  name = "DocumentProcessorRole"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRoleWithWebIdentity"
-        Effect = "Allow"
-        Principal = {
-          Federated = module.eks.oidc_provider_arn
-        }
-        Condition = {
-          StringEquals = {
-            "${replace(module.eks.oidc_provider_arn, "/^(.*provider/)/", "")}:sub" = "system:serviceaccount:default:document-processor-sa"
-            "${replace(module.eks.oidc_provider_arn, "/^(.*provider/)/", "")}:aud" = "sts.amazonaws.com"
-          }
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_policy" "document_processor_policy" {
-  name        = "DocumentProcessorPolicy"
-  description = "Policy for document processor service"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          aws_s3_bucket.documents.arn,
-          "${aws_s3_bucket.documents.arn}/*"
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:Query",
-          "dynamodb:Scan"
-        ]
-        Resource = [
-          aws_dynamodb_table.document_results.arn,
-          "${aws_dynamodb_table.document_results.arn}/index/*"
-        ]
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "document_processor_policy_attachment" {
-  role       = aws_iam_role.document_processor_role.name
-  policy_arn = aws_iam_policy.document_processor_policy.arn
+  tags = local.common_tags
 }
 
 # ECR Repository
@@ -284,8 +198,11 @@ resource "aws_ecr_repository" "document_processor" {
   encryption_configuration {
     encryption_type = "AES256"
   }
+
+  tags = local.common_tags
 }
 
+# ECR Lifecycle Policy
 resource "aws_ecr_lifecycle_policy" "document_processor" {
   repository = aws_ecr_repository.document_processor.name
 
@@ -293,12 +210,12 @@ resource "aws_ecr_lifecycle_policy" "document_processor" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep last 30 images"
+        description  = "Keep last 5 images"
         selection = {
           tagStatus     = "tagged"
           tagPrefixList = ["v"]
           countType     = "imageCountMoreThan"
-          countNumber   = 30
+          countNumber   = 5
         }
         action = {
           type = "expire"
@@ -308,8 +225,83 @@ resource "aws_ecr_lifecycle_policy" "document_processor" {
   })
 }
 
-# Application Load Balancer Controller
-resource "aws_iam_role" "alb_controller" {
+# IAM role for the document processor pods
+resource "aws_iam_role" "document_processor" {
+  name = "${var.project_name}-pod-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Effect = "Allow"
+        Principal = {
+          Federated = module.eks.oidc_provider_arn
+        }
+        Condition = {
+          StringEquals = {
+            "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:sub" = "system:serviceaccount:default:document-processor-sa"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+# IAM policy for document processor
+resource "aws_iam_policy" "document_processor" {
+  name = "${var.project_name}-pod-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${aws_s3_bucket.documents.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.documents.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.results.arn,
+          "${aws_dynamodb_table.results.arn}/index/*"
+        ]
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "document_processor" {
+  role       = aws_iam_role.document_processor.name
+  policy_arn = aws_iam_policy.document_processor.arn
+}
+
+# AWS Load Balancer Controller IAM role
+resource "aws_iam_role" "aws_load_balancer_controller" {
   name = "${var.project_name}-alb-controller"
 
   assume_role_policy = jsonencode({
@@ -323,188 +315,28 @@ resource "aws_iam_role" "alb_controller" {
         }
         Condition = {
           StringEquals = {
-            "${replace(module.eks.oidc_provider_arn, "/^(.*provider/)/", "")}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
-            "${replace(module.eks.oidc_provider_arn, "/^(.*provider/)/", "")}:aud" = "sts.amazonaws.com"
+            "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
           }
         }
       }
     ]
   })
+
+  tags = local.common_tags
 }
 
-resource "aws_iam_policy" "alb_controller" {
-  name        = "${var.project_name}-alb-controller-policy"
-  description = "Policy for AWS Load Balancer Controller"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "iam:CreateServiceLinkedRole",
-          "ec2:DescribeAccountAttributes",
-          "ec2:DescribeAddresses",
-          "ec2:DescribeAvailabilityZones",
-          "ec2:DescribeInternetGateways",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeInstances",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DescribeTags",
-          "ec2:GetCoipPoolUsage",
-          "ec2:DescribeCoipPools",
-          "elasticloadbalancing:DescribeLoadBalancers",
-          "elasticloadbalancing:DescribeLoadBalancerAttributes",
-          "elasticloadbalancing:DescribeListeners",
-          "elasticloadbalancing:DescribeListenerCertificates",
-          "elasticloadbalancing:DescribeSSLPolicies",
-          "elasticloadbalancing:DescribeRules",
-          "elasticloadbalancing:DescribeTargetGroups",
-          "elasticloadbalancing:DescribeTargetGroupAttributes",
-          "elasticloadbalancing:DescribeTargetHealth",
-          "elasticloadbalancing:DescribeTags"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "cognito-idp:DescribeUserPoolClient",
-          "acm:ListCertificates",
-          "acm:DescribeCertificate",
-          "iam:ListServerCertificates",
-          "iam:GetServerCertificate",
-          "waf-regional:GetWebACL",
-          "waf-regional:GetWebACLForResource",
-          "waf-regional:AssociateWebACL",
-          "waf-regional:DisassociateWebACL",
-          "wafv2:GetWebACL",
-          "wafv2:GetWebACLForResource",
-          "wafv2:AssociateWebACL",
-          "wafv2:DisassociateWebACL",
-          "shield:DescribeProtection",
-          "shield:CreateProtection",
-          "shield:DescribeSubscription",
-          "shield:ListProtections"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:RevokeSecurityGroupIngress"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateSecurityGroup"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateTags"
-        ]
-        Resource = "arn:aws:ec2:*:*:security-group/*"
-        Condition = {
-          StringEquals = {
-            "ec2:CreateAction" = "CreateSecurityGroup"
-          }
-          Null = {
-            "aws:RequestedRegion" = "false"
-          }
-        }
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:CreateLoadBalancer",
-          "elasticloadbalancing:CreateTargetGroup"
-        ]
-        Resource = "*"
-        Condition = {
-          Null = {
-            "aws:RequestedRegion" = "false"
-          }
-        }
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:CreateListener",
-          "elasticloadbalancing:DeleteListener",
-          "elasticloadbalancing:CreateRule",
-          "elasticloadbalancing:DeleteRule"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:AddTags",
-          "elasticloadbalancing:RemoveTags"
-        ]
-        Resource = [
-          "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
-          "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*",
-          "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*"
-        ]
-        Condition = {
-          Null = {
-            "aws:RequestedRegion" = "false"
-            "aws:ResourceTag/elbv2.k8s.aws/cluster" = "false"
-          }
-        }
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:ModifyLoadBalancerAttributes",
-          "elasticloadbalancing:SetIpAddressType",
-          "elasticloadbalancing:SetSecurityGroups",
-          "elasticloadbalancing:SetSubnets",
-          "elasticloadbalancing:DeleteLoadBalancer",
-          "elasticloadbalancing:ModifyTargetGroup",
-          "elasticloadbalancing:ModifyTargetGroupAttributes",
-          "elasticloadbalancing:DeleteTargetGroup"
-        ]
-        Resource = "*"
-        Condition = {
-          Null = {
-            "aws:ResourceTag/elbv2.k8s.aws/cluster" = "false"
-          }
-        }
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:RegisterTargets",
-          "elasticloadbalancing:DeregisterTargets"
-        ]
-        Resource = "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:SetWebAcl",
-          "elasticloadbalancing:ModifyListener",
-          "elasticloadbalancing:AddListenerCertificates",
-          "elasticloadbalancing:RemoveListenerCertificates",
-          "elasticloadbalancing:ModifyRule"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
+# Download and attach AWS Load Balancer Controller policy
+data "http" "alb_controller_policy" {
+  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.4.4/docs/install/iam_policy.json"
 }
 
-resource "aws_iam_role_policy_attachment" "alb_controller" {
-  policy_arn = aws_iam_policy.alb_controller.arn
-  role       = aws_iam_role.alb_controller.name
+resource "aws_iam_policy" "aws_load_balancer_controller" {
+  name   = "${var.project_name}-alb-controller-policy"
+  policy = data.http.alb_controller_policy.response_body
+  tags   = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "aws_load_balancer_controller" {
+  role       = aws_iam_role.aws_load_balancer_controller.name
+  policy_arn = aws_iam_policy.aws_load_balancer_controller.arn
 }
