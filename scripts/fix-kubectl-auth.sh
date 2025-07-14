@@ -2,7 +2,7 @@
 # Fix kubectl authentication issue with EKS
 set -e
 
-PROJECT_NAME="dp714"
+PROJECT_NAME="document-processor"
 AWS_REGION="${1:-us-east-1}"
 
 echo "Fixing kubectl authentication for EKS cluster..."
