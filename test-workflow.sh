@@ -77,6 +77,21 @@ log "Step 1: Uploading file to S3..."
 aws s3 cp "$TEST_FILE" "s3://$BUCKET_NAME/$S3_KEY" --region $AWS_REGION
 if [[ $? -eq 0 ]]; then
     log "File uploaded successfully to s3://$BUCKET_NAME/$S3_KEY"
+    
+    # Show public URL
+    PUBLIC_URL="https://$BUCKET_NAME.s3.$AWS_REGION.amazonaws.com/$S3_KEY"
+    log "🌐 Public URL: $PUBLIC_URL"
+    
+    # Test if public access is working
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$PUBLIC_URL" || echo "000")
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+        log "✅ File is publicly accessible"
+    elif [[ "$HTTP_STATUS" == "403" ]]; then
+        warn "⚠️  File is not publicly accessible (bucket may not be public)"
+        warn "Run: ./make-s3-public.sh to enable public access"
+    else
+        warn "⚠️  Could not test public access (HTTP $HTTP_STATUS)"
+    fi
 else
     error "Failed to upload file to S3"
 fi

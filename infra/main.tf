@@ -291,10 +291,42 @@ resource "aws_s3_bucket" "documents" {
 resource "aws_s3_bucket_public_access_block" "documents" {
   bucket = aws_s3_bucket.documents.id
 
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+# Bucket policy to allow public read access
+resource "aws_s3_bucket_policy" "documents_policy" {
+  bucket = aws_s3_bucket.documents.id
+  depends_on = [aws_s3_bucket_public_access_block.documents]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "PublicReadGetObject"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.documents.arn}/*"
+      }
+    ]
+  })
+}
+
+# CORS configuration for browser access
+resource "aws_s3_bucket_cors_configuration" "documents_cors" {
+  bucket = aws_s3_bucket.documents.id
+
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["GET", "PUT", "POST", "DELETE", "HEAD"]
+    allowed_origins = ["*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
+  }
 }
 
 # Lambda function IAM role
