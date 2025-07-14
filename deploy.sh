@@ -14,6 +14,11 @@ echo "🚀 Starting ECS deployment for Document Processor..."
 echo "Account ID: $ACCOUNT_ID"
 echo "ECR Repository: $ECR_REPO"
 
+# ---- Step 0: Build Lambda Package ----
+echo "📦 Building Lambda deployment package..."
+chmod +x build-lambda.sh
+./build-lambda.sh
+
 # ---- Step 1: Deploy Infrastructure ----
 echo "📦 Deploying infrastructure with Terraform..."
 cd infra

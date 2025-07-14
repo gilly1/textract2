@@ -42,6 +42,15 @@ Write-Log "🚀 Starting ECS deployment for Document Processor..."
 Write-Log "Account ID: $ACCOUNT_ID"
 Write-Log "ECR Repository: $ECR_REPO"
 
+# Step 0: Build Lambda Package
+Write-Log "📦 Building Lambda deployment package..."
+try {
+    .\build-lambda.ps1
+}
+catch {
+    Write-Error-Log "Failed to build Lambda package: $_"
+}
+
 # Step 1: Deploy Infrastructure
 if (-not $SkipTerraform) {
     Write-Log "📦 Deploying infrastructure with Terraform..."
