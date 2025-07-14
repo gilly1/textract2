@@ -162,7 +162,7 @@ The Lambda function (`dynamodb_trigger.py`) automatically triggers document proc
 - **Memory**: 128 MB (default)
 - **Environment Variables**:
   - `ECS_SERVICE_URL`: ALB URL for the ECS service
-  - `AWS_DEFAULT_REGION`: us-east-1
+  - `AWS_REGION`: Automatically provided by Lambda (us-east-1)
 
 ### Event Source
 - **DynamoDB Stream**: Triggered on INSERT events only
@@ -273,37 +273,6 @@ DYNAMODB_TABLE_NAME: "document-processor-results"
 - GetObject, PutObject
 - Access to `document-processor-documents` bucket
 
-## API Endpoints
-
-### Health Check
-```bash
-GET /health
-```
-Returns service health status.
-
-### Process Document
-```bash
-POST /process
-Content-Type: application/json
-
-{
-  "record": {
-    "document_id": "unique-doc-id",
-    "bucket": "document-processor-documents",
-    "key": "document.pdf",
-    "status": "pending",
-    "file_type": "pdf",
-    "source": "api"
-  }
-}
-```
-
-### Get Status
-```bash
-GET /status/{document_id}
-```
-Returns processing status and results.
-
 ## Testing
 
 ### Upload Test Document
@@ -315,7 +284,7 @@ aws s3 cp invoice.pdf s3://document-processor-documents/test-document.pdf
 ### Run Tests
 ```bash
 # Comprehensive service test
-./scripts/test-processor.sh
+./test-workflow.sh invoice.pdf
 
 # Check DynamoDB records
 aws dynamodb scan --table-name document-processor-results --max-items 5
@@ -323,17 +292,18 @@ aws dynamodb scan --table-name document-processor-results --max-items 5
 
 ### Verify Deployment
 ```bash
-# Check pod status
-kubectl get pods -l app=document-processor
+# Check ECS service status
+aws ecs describe-services --cluster document-processor-cluster --services document-processor-service
 
-# Check service
-kubectl get service document-processor-service
+# Check ALB target health
+aws elbv2 describe-target-health --target-group-arn $(aws elbv2 describe-target-groups --names document-processor-tg --query 'TargetGroups[0].TargetGroupArn' --output text)
 
-# Check ingress
-kubectl get ingress document-processor-ingress
+# View ECS task logs
+aws logs tail /ecs/document-processor --follow
 
-# View logs
-kubectl logs -l app=document-processor -f
+# Test health endpoint
+ALB_URL=$(cd infra && terraform output -raw load_balancer_url)
+curl $ALB_URL/health
 ```
 
 ## Troubleshooting
@@ -463,54 +433,47 @@ chmod +x test-workflow.sh
 ### Deployment Automation
 
 **Infrastructure Deployment:**
-```powershell
-# Navigate to project directory
-cd c:\laragon\www\python\my_textract_3
-
-# Run automated deployment
-.\scripts\deploy.ps1
-```
-
-**Linux/macOS:**
 ```bash
 # Navigate to project directory
 cd /path/to/my_textract_3
 
 # Make scripts executable
-chmod +x scripts/*.sh
+chmod +x *.sh
 
 # Run automated deployment
-./scripts/deploy.sh
+./deploy.sh
 ```
 
 ### Available Scripts
 
-- `scripts/deploy.sh` / `scripts/deploy.ps1` - Complete deployment automation
-- `scripts/test-processor.sh` - Service testing
-- `scripts/update-deployment.sh` - Update existing deployment
-- `scripts/fix-deployment.sh` - Fix deployment issues
+- `deploy.sh` / `deploy.ps1` - Complete deployment automation
+- `test-workflow.sh` / `test-workflow.ps1` - End-to-end workflow testing
 
 ### Script Options
 
 **Plan-Only Mode:**
 ```bash
 # Linux/macOS
-./scripts/deploy.sh --plan-only
+./deploy.sh
 
 # Windows
-.\scripts\deploy.ps1 -PlanOnly
+.\deploy.ps1
 ```
 
 ## Cleanup
 
-### Remove Application
+### Stop ECS Service
 ```bash
-kubectl delete -f k8s/
+# Scale down ECS service
+aws ecs update-service --cluster document-processor-cluster --service document-processor-service --desired-count 0
+
+# Delete ECS service (optional)
+aws ecs delete-service --cluster document-processor-cluster --service document-processor-service --force
 ```
 
 ### Destroy Infrastructure
 ```bash
-cd terraform
+cd infra
 terraform destroy
 ```
 
@@ -518,15 +481,10 @@ terraform destroy
 
 For issues or questions:
 1. Check the troubleshooting section
-2. Review pod logs: `kubectl logs -l app=document-processor`
+2. Review ECS task logs: `aws logs tail /ecs/document-processor --follow`
 3. Verify AWS resource configurations
-4. Test individual components (S3, DynamoDB, ECR)
+4. Test individual components (S3, DynamoDB, ECR, ALB)
 
 ## License
 
 This project is licensed under the MIT License.
-
-4. **Automated testing:**
-   ```bash
-   python scripts/test_pipeline.py BUCKET_NAME STEP_FUNCTION_ARN TABLE_NAME path/to/test.pdf
-   ```
