@@ -18,4 +18,5 @@ aws ecs update-service \
 
 echo "✅ Deployment initiated. Wait 2-3 minutes then test again."
 echo "📊 Monitor logs with:"
-echo "aws logs tail /ecs/document-processor --follow"
+echo "aws logs describe-log-groups --log-group-name-prefix '/ecs'"
+echo "aws logs get-log-events --log-group-name '/ecs/document-processor' --log-stream-name \$(aws logs describe-log-streams --log-group-name '/ecs/document-processor' --order-by LastEventTime --descending --max-items 1 --query 'logStreams[0].logStreamName' --output text)"
