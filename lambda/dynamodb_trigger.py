@@ -11,7 +11,7 @@ logger.setLevel(logging.INFO)
 
 # Environment variables
 ECS_SERVICE_URL = os.getenv('ECS_SERVICE_URL')  # ALB URL for ECS service
-AWS_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')  # AWS automatically provides AWS_REGION
 
 def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     """

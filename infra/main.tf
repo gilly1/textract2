@@ -305,7 +305,6 @@ resource "aws_lambda_function" "dynamodb_trigger" {
   environment {
     variables = {
       ECS_SERVICE_URL = "http://${aws_lb.app.dns_name}"
-      AWS_DEFAULT_REGION = "us-east-1"
     }
   }
 
