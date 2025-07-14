@@ -20,12 +20,19 @@ try {
     }
 
     # Check S3 bucket
-    $S3Bucket = "${ProjectName}-documents-$(Get-Random -Minimum 100000 -Maximum 999999)"
-    $BucketExists = aws s3api head-bucket --bucket $S3Bucket 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ S3 Bucket exists and accessible" -ForegroundColor Green
+    Write-Host "Checking S3 bucket..." -ForegroundColor Yellow
+    # Get the actual bucket name from Terraform
+    Push-Location terraform -ErrorAction SilentlyContinue
+    $S3Bucket = terraform output -raw s3_bucket_name 2>$null
+    Pop-Location -ErrorAction SilentlyContinue
+    
+    if ($S3Bucket -and (aws s3api head-bucket --bucket $S3Bucket 2>$null; $LASTEXITCODE -eq 0)) {
+        Write-Host "✅ S3 Bucket exists and accessible: $S3Bucket" -ForegroundColor Green
     } else {
-        Write-Host "❌ S3 Bucket not accessible" -ForegroundColor Red
+        Write-Host "❌ S3 Bucket not accessible or not found" -ForegroundColor Red
+        if (-not $S3Bucket) {
+            Write-Host "   Could not get bucket name from Terraform output" -ForegroundColor Yellow
+        }
     }
 
     # Check DynamoDB table

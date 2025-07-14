@@ -4,7 +4,7 @@
 set -e
 
 # Configuration
-PROJECT_NAME="document-processor"
+PROJECT_NAME="dp714"
 IMAGE_TAG=${1:-"latest"}
 AWS_REGION=${AWS_REGION:-"us-east-1"}
 

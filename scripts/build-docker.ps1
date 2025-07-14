@@ -5,7 +5,7 @@ param(
 )
 
 # Configuration
-$ProjectName = "docproc-714499"
+$ProjectName = "dp714"
 
 Write-Host "Building Document Processor Docker Image..." -ForegroundColor Green
 

@@ -22,11 +22,18 @@ fi
 
 # Check S3 bucket
 echo "Checking S3 bucket..."
-S3_BUCKET="${PROJECT_NAME}-documents-$(shuf -i 100000-999999 -n 1)"
-if aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
-    echo "✅ S3 Bucket exists and accessible"
+# Get the actual bucket name from Terraform
+cd terraform 2>/dev/null || true
+S3_BUCKET=$(terraform output -raw s3_bucket_name 2>/dev/null || echo "")
+cd .. 2>/dev/null || true
+
+if [ -n "$S3_BUCKET" ] && aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
+    echo "✅ S3 Bucket exists and accessible: $S3_BUCKET"
 else
-    echo "❌ S3 Bucket not accessible"
+    echo "❌ S3 Bucket not accessible or not found"
+    if [ -z "$S3_BUCKET" ]; then
+        echo "   Could not get bucket name from Terraform output"
+    fi
 fi
 
 # Check DynamoDB table
