@@ -119,18 +119,23 @@ for i in {1..12}; do
     log "Checking status (attempt $i/12)..."
     
     # Get status from DynamoDB
-    RESPONSE=$(aws dynamodb get-item \
+    STATUS=$(aws dynamodb get-item \
         --region $AWS_REGION \
         --table-name "$DYNAMODB_TABLE" \
         --key "{\"id\": {\"S\": \"$DOCUMENT_ID\"}}" \
-        --output json 2>/dev/null)
+        --query 'Item.status.S' \
+        --output text 2>/dev/null)
     
-    if [[ $? -eq 0 ]]; then
-        STATUS=$(echo "$RESPONSE" | jq -r '.Item.status.S // "unknown"')
-        CURRENT_STEP=$(echo "$RESPONSE" | jq -r '.Item.current_step.S // "not set"')
-        
+    CURRENT_STEP=$(aws dynamodb get-item \
+        --region $AWS_REGION \
+        --table-name "$DYNAMODB_TABLE" \
+        --key "{\"id\": {\"S\": \"$DOCUMENT_ID\"}}" \
+        --query 'Item.current_step.S' \
+        --output text 2>/dev/null)
+    
+    if [[ $? -eq 0 && "$STATUS" != "None" ]]; then
         log "Current status: $STATUS"
-        if [[ "$CURRENT_STEP" != "not set" ]]; then
+        if [[ "$CURRENT_STEP" != "None" && "$CURRENT_STEP" != "" ]]; then
             log "Current step: $CURRENT_STEP"
         fi
         
@@ -139,24 +144,60 @@ for i in {1..12}; do
                 log "✅ Processing completed successfully!"
                 
                 # Show results
-                VALIDATION_SCORE=$(echo "$RESPONSE" | jq -r '.Item.validation_score.N // "unknown"')
-                log "Validation score: $VALIDATION_SCORE"
+                VALIDATION_SCORE=$(aws dynamodb get-item \
+                    --region $AWS_REGION \
+                    --table-name "$DYNAMODB_TABLE" \
+                    --key "{\"id\": {\"S\": \"$DOCUMENT_ID\"}}" \
+                    --query 'Item.validation_score.N' \
+                    --output text 2>/dev/null)
+                
+                if [[ "$VALIDATION_SCORE" != "None" ]]; then
+                    log "Validation score: $VALIDATION_SCORE"
+                fi
                 
                 # Get processed date
-                PROCESSED_DATE=$(echo "$RESPONSE" | jq -r '.Item.processed_date.S // "unknown"')
-                log "Processed date: $PROCESSED_DATE"
+                PROCESSED_DATE=$(aws dynamodb get-item \
+                    --region $AWS_REGION \
+                    --table-name "$DYNAMODB_TABLE" \
+                    --key "{\"id\": {\"S\": \"$DOCUMENT_ID\"}}" \
+                    --query 'Item.processed_date.S' \
+                    --output text 2>/dev/null)
+                
+                if [[ "$PROCESSED_DATE" != "None" ]]; then
+                    log "Processed date: $PROCESSED_DATE"
+                fi
                 
                 # Check if there are QR codes
-                QR_COUNT=$(echo "$RESPONSE" | jq -r '.Item.qr_codes.L | length // 0')
-                log "QR codes found: $QR_COUNT"
+                QR_CODES_RESPONSE=$(aws dynamodb get-item \
+                    --region $AWS_REGION \
+                    --table-name "$DYNAMODB_TABLE" \
+                    --key "{\"id\": {\"S\": \"$DOCUMENT_ID\"}}" \
+                    --query 'Item.qr_codes.L' \
+                    --output text 2>/dev/null)
+                
+                if [[ "$QR_CODES_RESPONSE" != "None" && "$QR_CODES_RESPONSE" != "" ]]; then
+                    log "QR codes found in document"
+                else
+                    log "No QR codes found"
+                fi
                 
                 log "✅ Test completed successfully!"
                 break
                 ;;
             "failed")
                 warn "❌ Processing failed"
-                ERROR_MSG=$(echo "$RESPONSE" | jq -r '.Item.error.S // "No error message"')
-                warn "Error: $ERROR_MSG"
+                ERROR_MSG=$(aws dynamodb get-item \
+                    --region $AWS_REGION \
+                    --table-name "$DYNAMODB_TABLE" \
+                    --key "{\"id\": {\"S\": \"$DOCUMENT_ID\"}}" \
+                    --query 'Item.error.S' \
+                    --output text 2>/dev/null)
+                
+                if [[ "$ERROR_MSG" != "None" && "$ERROR_MSG" != "" ]]; then
+                    warn "Error: $ERROR_MSG"
+                else
+                    warn "No error message available"
+                fi
                 break
                 ;;
             "processing")
