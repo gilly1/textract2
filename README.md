@@ -1,6 +1,6 @@
-# Document Processor Service - EKS Deployment
+# Document Processor Service - ECS Deployment
 
-A FastAPI-based document processing service that extracts text and QR codes from PDFs and images using OCR technology. Deployed on AWS EKS with full cloud infrastructure automation.
+A FastAPI-based document processing service that extracts text and QR codes from PDFs and images using OCR technology. Deployed on AWS ECS with full cloud infrastructure automation and Lambda-triggered processing.
 
 ## Features
 
@@ -9,26 +9,42 @@ A FastAPI-based document processing service that extracts text and QR codes from
 - **QR Code Detection**: Automatic QR code scanning and data extraction
 - **Cloud Storage**: S3 integration for document storage
 - **Database**: DynamoDB for processing results and status tracking
-- **Kubernetes**: Scalable deployment on AWS EKS
-- **IRSA Security**: IAM Roles for Service Accounts for secure AWS access
+- **Container Service**: Scalable deployment on AWS ECS Fargate
+- **Event-Driven**: Lambda function triggered by DynamoDB streams
+- **Automated Processing**: Documents are processed automatically when inserted into DynamoDB
 
 ## Architecture
 
 ```
-├── FastAPI Application (main.py)
-├── AWS EKS Cluster
-├── S3 Bucket (document-processor-documents)
-├── DynamoDB Table (document-processor-results)
-├── ECR Repository (document-processor/document-processor)
-└── ALB Ingress Controller
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  File Upload    │    │   DynamoDB      │    │   Lambda        │
+│  to S3          │───▶│   Record        │───▶│   Trigger       │
+│                 │    │   Insert        │    │                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                       │
+                                                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  DynamoDB       │◀───│   FastAPI       │◀───│   HTTP POST     │
+│  Status Update  │    │   /process      │    │   Request       │
+│                 │    │   Endpoint      │    │                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
+
+### Components:
+- **FastAPI Application**: Document processing service running on ECS
+- **AWS ECS Fargate**: Serverless container hosting
+- **Application Load Balancer**: HTTP traffic routing
+- **S3 Bucket**: Document storage (document-processor-documents)
+- **DynamoDB Table**: Processing results with stream enabled
+- **Lambda Function**: Triggers processing on new document inserts
+- **ECR Repository**: Container image storage
 
 ## Prerequisites
 
 - AWS CLI configured with appropriate permissions
 - Docker installed
-- kubectl installed
 - Terraform >= 1.0
+- Python 3.11+ (for Lambda function)
 - jq (optional, for JSON parsing in scripts)
 
 ## Quick Start
@@ -40,89 +56,196 @@ git clone <repository-url>
 cd my_textract_3
 ```
 
-### 2. Deploy Infrastructure
+### 2. One-Command Deployment
 
-```bash
-cd terraform
-terraform init
-terraform plan
-terraform apply
+**Windows (PowerShell):**
+```powershell
+.\deploy.ps1
 ```
 
-This creates:
-- EKS cluster with managed node groups
-- VPC with public/private subnets
-- S3 bucket for documents
-- DynamoDB table for results
-- ECR repository
-- IAM roles with IRSA configuration
-
-### 3. Configure kubectl
-
+**Linux/macOS (Bash):**
 ```bash
-aws eks update-kubeconfig --region us-east-1 --name document-processor-cluster
+chmod +x deploy.sh
+./deploy.sh
 ```
 
-### 4. Deploy Application
+This will:
+- Deploy all AWS infrastructure via Terraform
+- Build and push Docker image to ECR
+- Deploy the ECS service
+- Test the health endpoint
+- Show service URLs and monitoring commands
 
-```bash
-# Build and push Docker image
-docker build -t document-processor:latest .
-docker tag document-processor:latest 105714714499.dkr.ecr.us-east-1.amazonaws.com/document-processor/document-processor:latest
+### 3. Test the Complete Workflow
 
-# Login to ECR and push
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 105714714499.dkr.ecr.us-east-1.amazonaws.com
-docker push 105714714499.dkr.ecr.us-east-1.amazonaws.com/document-processor/document-processor:latest
-
-# Deploy to Kubernetes
-kubectl apply -f k8s/
+**Windows:**
+```powershell
+.\test-workflow.ps1 -TestFile "invoice.pdf"
 ```
 
-### 5. Test the Service
-
+**Linux/macOS:**
 ```bash
-# Run comprehensive tests
-chmod +x scripts/test-processor.sh
-./scripts/test-processor.sh
+./test-workflow.sh invoice.pdf
 ```
 
-## Testing
+This will:
+- Upload a document to S3
+- Insert a record in DynamoDB with status "pending"
+- Lambda automatically triggers processing
+- Monitor processing status until completion
+- Display results
+
+## Workflow
+
+### Automated Processing Flow
+
+1. **Upload Document**: Upload a PDF or image file to the S3 bucket
+2. **Create Record**: Insert a record in DynamoDB with status "pending"
+3. **Lambda Trigger**: DynamoDB stream automatically triggers the Lambda function
+4. **API Call**: Lambda calls the FastAPI `/process` endpoint
+5. **Processing**: FastAPI downloads file from S3, processes it with OCR
+6. **Results**: Processing results are stored back in DynamoDB
+
+### Manual Testing
+
+You can test the entire workflow using the provided scripts:
+
+#### Windows (PowerShell):
+```powershell
+.\test-workflow.ps1 -TestFile "invoice.pdf"
+```
+
+#### Linux/macOS (Bash):
+```bash
+chmod +x test-workflow.sh
+./test-workflow.sh invoice.pdf
+```
+
+### Testing Steps
 
 1. **Get deployment outputs:**
    ```bash
-   cd terraform
+   cd infra
    terraform output
    ```
 
-2. **Upload a test PDF:**
+2. **Test complete workflow:**
+   The test scripts will:
+   - Upload your document to S3
+   - Insert a "pending" record in DynamoDB
+   - Wait for Lambda to trigger processing
+   - Monitor the processing status
+   - Display final results
+
+3. **Manual API testing:**
    ```bash
-   aws s3 cp your-document.pdf s3://YOUR-BUCKET-NAME/uploads/
+   # Get ALB URL from Terraform output
+   ALB_URL=$(cd infra && terraform output -raw load_balancer_url)
+   
+   # Test health endpoint
+   curl $ALB_URL/health
+   
+   # Check document status
+   curl $ALB_URL/status/YOUR_DOCUMENT_ID
    ```
 
 3. **Monitor processing:**
    - Check Step Functions console for execution status
-   - View results in DynamoDB table
+## Lambda Function
+
+### Purpose
+The Lambda function (`dynamodb_trigger.py`) automatically triggers document processing when new records are inserted into DynamoDB with status "pending".
+
+### Configuration
+- **Runtime**: Python 3.11
+- **Timeout**: 60 seconds
+- **Memory**: 128 MB (default)
+- **Environment Variables**:
+  - `ECS_SERVICE_URL`: ALB URL for the ECS service
+  - `AWS_DEFAULT_REGION`: us-east-1
+
+### Event Source
+- **DynamoDB Stream**: Triggered on INSERT events only
+- **Filter**: Only processes records with status "pending"
+- **Starting Position**: LATEST
+
+### Function Flow
+1. Receives DynamoDB stream event
+2. Filters for INSERT events with status "pending"
+3. Converts DynamoDB format to API format
+4. Calls FastAPI `/process` endpoint
+5. Logs results and errors
+
+### Monitoring Lambda
+```bash
+# View Lambda logs
+aws logs tail /aws/lambda/document-processor-dynamodb-trigger --follow
+
+# Check Lambda metrics
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/Lambda \
+    --metric-name Invocations \
+    --dimensions Name=FunctionName,Value=document-processor-dynamodb-trigger \
+    --start-time 2024-01-01T00:00:00Z \
+    --end-time 2024-01-01T23:59:59Z \
+    --period 3600 \
+    --statistics Sum
+```
+
+## API Endpoints
+
+### Health Check
+```bash
+GET /health
+```
+Returns service health status.
+
+### Process Document
+```bash
+POST /process
+Content-Type: application/json
+
+{
+    "record": {
+        "document_id": "unique-id",
+        "bucket": "bucket-name",
+        "key": "path/to/file.pdf",
+        "status": "pending",
+        "file_type": "pdf"
+    }
+}
+```
+
+### Get Processing Status
+```bash
+GET /status/{document_id}
+```
+Returns processing status and results for a document.
 
 ## Detailed Deployment Guide
 
 ### Infrastructure Components
 
-#### EKS Cluster Configuration
+#### ECS Configuration
 - **Cluster Name**: `document-processor-cluster`
-- **Kubernetes Version**: 1.28
-- **Node Groups**: Managed with auto-scaling
-- **IRSA Enabled**: For secure AWS service access
+- **Service Type**: Fargate
+- **Task Definition**: 256 CPU, 512 MB memory
+- **Desired Count**: 1 (auto-scalable)
+- **Load Balancer**: Application Load Balancer
 
 #### Storage Resources
 - **S3 Bucket**: `document-processor-documents`
+  - Private access only
+  - Used for document storage
 - **DynamoDB Table**: `document-processor-results`
   - Primary Key: `id` (String)
-  - Global Secondary Index: `status-index`
+  - Stream Enabled: NEW_AND_OLD_IMAGES
+  - Billing Mode: PAY_PER_REQUEST
 
 #### Container Registry
-- **ECR Repository**: `document-processor/document-processor`
+- **ECR Repository**: `document-processor`
 - **Image Scanning**: Enabled
-- **Lifecycle Policy**: Configured for image cleanup
+- **Latest Tag**: Always used for deployments
 
 ### Application Configuration
 
@@ -130,27 +253,21 @@ chmod +x scripts/test-processor.sh
 ```yaml
 AWS_DEFAULT_REGION: "us-east-1"
 DYNAMODB_TABLE_NAME: "document-processor-results"
-S3_BUCKET_NAME: "document-processor-documents"
 ```
 
 #### Health Checks
-- **Liveness Probe**: `/health` endpoint
-- **Readiness Probe**: `/health` endpoint
-- **Port**: 8080
+- **Target Group Health Check**: `/health` endpoint
+- **Interval**: 30 seconds
+- **Timeout**: 5 seconds
+- **Healthy Threshold**: 2
+- **Unhealthy Threshold**: 2
 
 ### Security Configuration
 
-#### IAM Roles and IRSA
-```bash
-# Service Account with IAM Role
-kubectl annotate serviceaccount document-processor-sa \
-  eks.amazonaws.com/role-arn=arn:aws:iam::105714714499:role/document-processor-pod-role \
-  --overwrite
-```
-
-#### DynamoDB Permissions
-- GetItem, PutItem, UpdateItem, Query
-- Access to `document-processor-results` table
+#### IAM Roles
+- **ECS Task Role**: Permissions for DynamoDB and S3 access
+- **Lambda Role**: DynamoDB stream read permissions
+- **ECS Execution Role**: ECR and CloudWatch permissions
 
 #### S3 Permissions
 - GetObject, PutObject
@@ -223,52 +340,129 @@ kubectl logs -l app=document-processor -f
 
 ### Common Issues and Solutions
 
-#### 1. DynamoDB Schema Errors
-**Issue**: "The provided key element does not match the schema"
-**Solution**: Ensure using `id` as primary key, not `document_id`
+#### 1. Lambda Not Triggering
+**Issue**: Lambda function doesn't trigger after DynamoDB insert
+**Solutions**:
+- Check DynamoDB stream is enabled: `aws dynamodb describe-table --table-name document-processor-results`
+- Verify Lambda event source mapping: `aws lambda list-event-source-mappings`
+- Check Lambda logs: `aws logs tail /aws/lambda/document-processor-dynamodb-trigger --follow`
 
-#### 2. Float Type Errors
-**Issue**: "Float types are not supported. Use Decimal types instead"
-**Solution**: Use `convert_float_to_decimal()` function for DynamoDB operations
+#### 2. ECS Service Not Responding
+**Issue**: ALB health checks failing
+**Solutions**:
+- Check ECS service status: `aws ecs describe-services --cluster document-processor-cluster --services document-processor-service`
+- View ECS task logs: `aws logs tail /ecs/document-processor --follow`
+- Verify security groups allow ALB to reach ECS tasks on port 8080
 
-#### 3. Reserved Keyword Errors
-**Issue**: "Attribute name is a reserved keyword: status"
-**Solution**: Use `ExpressionAttributeNames` with `#status`
+#### 3. Lambda API Call Failures
+**Issue**: Lambda can't reach ECS service
+**Solutions**:
+- Verify ALB URL in Lambda environment variables
+- Check ALB security group allows incoming traffic on port 80
+- Test ALB URL manually: `curl http://ALB-URL/health`
 
-#### 4. IRSA Authentication Issues
-**Issue**: AWS access denied from pods
-**Solution**: Verify service account annotation points to correct IAM role
+#### 4. DynamoDB Access Errors
+**Issue**: ECS tasks can't access DynamoDB
+**Solutions**:
+- Verify ECS task role has DynamoDB permissions
+- Check task role policy includes UpdateItem, GetItem, PutItem actions
+- Test DynamoDB access from ECS task
 
-#### 5. ECR Repository Access
-**Issue**: Image pull errors
-**Solution**: Ensure ECR repository name matches deployment configuration
+#### 5. ECR Image Pull Errors
+**Issue**: ECS can't pull container image
+**Solutions**:
+- Verify ECR repository exists and has images
+- Check ECS execution role has ECR permissions
+- Re-push latest image to ECR
 
 ### Debug Commands
+
+#### Lambda Function
 ```bash
-# Check pod logs for errors
-kubectl logs -l app=document-processor --tail=100
+# Check Lambda function configuration
+aws lambda get-function --function-name document-processor-dynamodb-trigger
 
-# Describe pod for events
-kubectl describe pod <pod-name>
+# View Lambda logs
+aws logs tail /aws/lambda/document-processor-dynamodb-trigger --follow
 
-# Check service account
-kubectl get serviceaccount document-processor-sa -o yaml
-
-# Verify IRSA configuration
-kubectl describe serviceaccount document-processor-sa
-
-# Test DynamoDB access
-aws dynamodb describe-table --table-name document-processor-results
-
-# Test S3 access
-aws s3 ls s3://document-processor-documents/
+# Test Lambda function manually
+aws lambda invoke --function-name document-processor-dynamodb-trigger \
+    --payload '{"Records":[{"eventName":"INSERT","dynamodb":{"NewImage":{"id":{"S":"test"},"status":{"S":"pending"},"bucket":{"S":"test-bucket"},"key":{"S":"test.pdf"},"file_type":{"S":"pdf"}}}}]}' \
+    response.json
 ```
+
+#### ECS Service
+```bash
+# Check ECS service status
+aws ecs describe-services --cluster document-processor-cluster --services document-processor-service
+
+# View ECS task logs
+aws logs tail /ecs/document-processor --follow
+
+# Check running tasks
+aws ecs list-tasks --cluster document-processor-cluster --service-name document-processor-service
+
+# Describe task for details
+aws ecs describe-tasks --cluster document-processor-cluster --tasks TASK-ARN
+```
+
+#### DynamoDB Stream
+```bash
+# Check stream status
+aws dynamodb describe-table --table-name document-processor-results | jq '.Table.StreamSpecification'
+
+# List event source mappings
+aws lambda list-event-source-mappings --function-name document-processor-dynamodb-trigger
+
+# Check stream records
+aws dynamodbstreams describe-stream --stream-arn STREAM-ARN
+```
+
+#### Load Balancer
+```bash
+# Check ALB status
+aws elbv2 describe-load-balancers --names document-processor-alb
+
+# Check target group health
+aws elbv2 describe-target-health --target-group-arn TARGET-GROUP-ARN
+
+# Test ALB endpoint
+curl -v http://ALB-DNS-NAME/health
+```
+
+### Monitoring and Logging
+
+#### CloudWatch Metrics
+- **Lambda**: Invocations, Duration, Errors
+- **ECS**: CPU/Memory utilization, Task count
+- **ALB**: Request count, Response time, HTTP errors
+- **DynamoDB**: Read/Write capacity, Throttled requests
+
+#### Log Groups
+- `/aws/lambda/document-processor-dynamodb-trigger`
+- `/ecs/document-processor`
+- `/aws/ecs/containerinsights/document-processor-cluster/performance`
 
 ## Automated Deployment Scripts
 
-### Cross-Platform Deployment
+### Cross-Platform Testing
 
 **Windows PowerShell:**
+```powershell
+# Test complete workflow
+.\test-workflow.ps1 -TestFile "invoice.pdf"
+```
+
+**Linux/macOS Bash:**
+```bash
+# Test complete workflow
+chmod +x test-workflow.sh
+./test-workflow.sh invoice.pdf
+```
+
+### Deployment Automation
+
+**Infrastructure Deployment:**
 ```powershell
 # Navigate to project directory
 cd c:\laragon\www\python\my_textract_3
