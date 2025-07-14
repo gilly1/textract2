@@ -3,6 +3,7 @@ import io
 import re
 import fitz
 import boto3
+from boto3.dynamodb.conditions import Key
 import cv2
 import pytesseract
 import tempfile
@@ -32,12 +33,20 @@ dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 # ----------------------------- Models -----------------------------
 
 class DynamoDBRecord(BaseModel):
-    document_id: str
-    bucket: str
-    key: str
+    fileId: str  # Changed from document_id, now the partition key
+    uploadedBy: str  # Sort key
+    fileName: str
+    fileType: str
+    fileSize: Optional[int] = None
+    s3Key: str  # Changed from key
+    s3Url: Optional[str] = None  # Changed from bucket reference
+    uploadDate: Optional[str] = None
     status: str
-    file_type: str
-    upload_date: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    # Legacy support
+    document_id: Optional[str] = None
+    bucket: Optional[str] = None
+    key: Optional[str] = None
 
 class ProcessingRequest(BaseModel):
     record: DynamoDBRecord
@@ -57,7 +66,8 @@ class OCRResult(BaseModel):
     word_details: Optional[List[Dict[str, Any]]] = None
 
 class ProcessingResult(BaseModel):
-    document_id: str
+    fileId: str  # Changed from document_id
+    uploadedBy: str
     status: str
     qr_codes: List[QRCode]
     ocr_results: List[OCRResult]
@@ -68,6 +78,14 @@ class ProcessingResult(BaseModel):
     validated_qr_links: List[str]
     invalid_qr_links: List[str]
     ocr_summary: Optional[Dict[str, Any]] = None
+    # Additional metadata fields
+    fileName: Optional[str] = None
+    fileType: Optional[str] = None
+    fileSize: Optional[int] = None
+    s3Key: Optional[str] = None
+    s3Url: Optional[str] = None
+    uploadDate: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 # -------------------------- Utilities ----------------------------
 
@@ -350,7 +368,7 @@ def format_ocr_summary(ocr_results: List[OCRResult]) -> Dict[str, Any]:
 
 # ----------------------- Background Processor ----------------------
 
-async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
+async def update_dynamodb(fileId: str, uploadedBy: str, updates: Dict[str, Any]):
     table = dynamodb.Table(DYNAMODB_TABLE_NAME)
     
     # Build expression parts
@@ -359,7 +377,7 @@ async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     values = {}
     
     # Debug logging
-    logger.info(f"Updating DynamoDB for document {document_id} with updates: {updates}")
+    logger.info(f"Updating DynamoDB for file {fileId} (user: {uploadedBy}) with updates: {updates}")
     
     # Handle each update field
     for k, v in updates.items():
@@ -385,9 +403,9 @@ async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     logger.info(f"ExpressionAttributeNames: {names}")
     logger.info(f"ExpressionAttributeValues keys: {list(values.keys())}")
     
-    # Update item
+    # Update item with composite key
     update_params = {
-        "Key": {"id": document_id},
+        "Key": {"fileId": fileId, "uploadedBy": uploadedBy},
         "UpdateExpression": expression,
         "ExpressionAttributeValues": convert_float_to_decimal(values)
     }
@@ -401,22 +419,29 @@ async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     
     try:
         table.update_item(**update_params)
-        logger.info(f"Successfully updated DynamoDB for document {document_id}")
+        logger.info(f"Successfully updated DynamoDB for file {fileId}")
     except Exception as e:
-        logger.error(f"DynamoDB update failed for document {document_id}: {str(e)}")
+        logger.error(f"DynamoDB update failed for file {fileId}: {str(e)}")
         raise
 
 async def process_document_background(record: DynamoDBRecord):
     try:
-        await update_dynamodb(record.document_id, {"status": "processing", "current_step": "downloading"})
+        # Get file identifiers - support both new and legacy formats
+        fileId = record.fileId if hasattr(record, 'fileId') and record.fileId else record.document_id
+        uploadedBy = record.uploadedBy if hasattr(record, 'uploadedBy') and record.uploadedBy else 'system'
+        s3_key = record.s3Key if hasattr(record, 's3Key') and record.s3Key else record.key
+        bucket = record.bucket if hasattr(record, 'bucket') and record.bucket else 'default-bucket'
+        file_type = record.fileType if hasattr(record, 'fileType') and record.fileType else record.file_type
+        
+        await update_dynamodb(fileId, uploadedBy, {"status": "processing", "current_step": "downloading"})
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = os.path.join(tmpdir, os.path.basename(record.key))
-            s3_client.download_file(record.bucket, record.key, file_path)
+            file_path = os.path.join(tmpdir, os.path.basename(s3_key))
+            s3_client.download_file(bucket, s3_key, file_path)
 
-            if record.file_type == "pdf":
+            if file_type == "pdf":
                 image_paths = convert_pdf_to_images(file_path, tmpdir)
-            elif record.file_type == "image":
+            elif file_type == "image":
                 image_paths = [file_path]
             else:
                 raise ValueError("Unsupported file type")
@@ -429,7 +454,7 @@ async def process_document_background(record: DynamoDBRecord):
                 ocr_results.append(ocr)
                 all_text += "\n" + ocr.text
 
-            await update_dynamodb(record.document_id, {"current_step": "validating"})
+            await update_dynamodb(fileId, uploadedBy, {"current_step": "validating"})
 
             invoice_fields = extract_invoice_fields(all_text)
             qr_data_list = [qr.data for qr in qr_codes]
@@ -440,7 +465,8 @@ async def process_document_background(record: DynamoDBRecord):
             ocr_summary = format_ocr_summary(ocr_results)
 
             result = ProcessingResult(
-                document_id=record.document_id,
+                fileId=fileId,
+                uploadedBy=uploadedBy,
                 status="completed" if score >= 50 else "failed",
                 qr_codes=qr_codes,
                 ocr_results=ocr_results,
@@ -450,7 +476,14 @@ async def process_document_background(record: DynamoDBRecord):
                 invoice_fields=invoice_fields,
                 validated_qr_links=valid_links,
                 invalid_qr_links=invalid_links,
-                ocr_summary=ocr_summary
+                ocr_summary=ocr_summary,
+                fileName=record.fileName if hasattr(record, 'fileName') else None,
+                fileType=record.fileType if hasattr(record, 'fileType') else None,
+                fileSize=record.fileSize if hasattr(record, 'fileSize') else None,
+                s3Key=record.s3Key if hasattr(record, 's3Key') else None,
+                s3Url=record.s3Url if hasattr(record, 's3Url') else None,
+                uploadDate=record.uploadDate if hasattr(record, 'uploadDate') else None,
+                metadata=record.metadata if hasattr(record, 'metadata') else None
             )
 
             # Prepare clean data for DynamoDB storage
@@ -471,7 +504,7 @@ async def process_document_background(record: DynamoDBRecord):
                     clean_result["word_details"] = o.word_details
                 clean_ocr_results.append(clean_result)
 
-            await update_dynamodb(record.document_id, clean_for_dynamodb({
+            await update_dynamodb(fileId, uploadedBy, clean_for_dynamodb({
                 "status": result.status,
                 "qr_codes": [q.dict() for q in result.qr_codes],
                 "ocr_results": clean_ocr_results,
@@ -481,12 +514,21 @@ async def process_document_background(record: DynamoDBRecord):
                 "processed_date": result.processed_date,
                 "invoice_fields": result.invoice_fields,
                 "validated_qr_links": result.validated_qr_links,
-                "invalid_qr_links": result.invalid_qr_links
+                "invalid_qr_links": result.invalid_qr_links,
+                "fileName": result.fileName,
+                "fileType": result.fileType,
+                "fileSize": result.fileSize,
+                "s3Key": result.s3Key,
+                "s3Url": result.s3Url,
+                "uploadDate": result.uploadDate,
+                "metadata": result.metadata
             }))
 
     except Exception as e:
-        logger.error(f"Error processing {record.document_id}: {e}")
-        await update_dynamodb(record.document_id, {
+        fileId = record.fileId if hasattr(record, 'fileId') and record.fileId else record.document_id
+        uploadedBy = record.uploadedBy if hasattr(record, 'uploadedBy') and record.uploadedBy else 'system'
+        logger.error(f"Error processing {fileId}: {e}")
+        await update_dynamodb(fileId, uploadedBy, {
             "status": "failed",
             "error": str(e),
             "processed_date": datetime.utcnow().isoformat()
@@ -500,15 +542,74 @@ async def process_document(request: ProcessingRequest, background_tasks: Backgro
     if record.status != "pending":
         raise HTTPException(status_code=400, detail="Document status must be 'pending'")
     background_tasks.add_task(process_document_background, record)
-    return {"message": "Processing started", "document_id": record.document_id}
+    
+    # Support both old and new response formats
+    file_id = record.fileId if hasattr(record, 'fileId') and record.fileId else record.document_id
+    return {"message": "Processing started", "fileId": file_id, "document_id": file_id}
 
-@app.get("/status/{document_id}")
-async def get_status(document_id: str):
+@app.get("/status/{fileId}")
+async def get_status(fileId: str, uploadedBy: str = "system"):
+    """Get status of a file by fileId and uploadedBy"""
     table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-    response = table.get_item(Key={"id": document_id})
+    response = table.get_item(Key={"fileId": fileId, "uploadedBy": uploadedBy})
     if "Item" not in response:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="File not found")
     return response["Item"]
+
+@app.get("/status/{fileId}/{uploadedBy}")
+async def get_status_with_user(fileId: str, uploadedBy: str):
+    """Get status of a file by fileId and uploadedBy (explicit route)"""
+    table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+    response = table.get_item(Key={"fileId": fileId, "uploadedBy": uploadedBy})
+    if "Item" not in response:
+        raise HTTPException(status_code=404, detail="File not found")
+    return response["Item"]
+
+@app.get("/files/{uploadedBy}")
+async def get_files_by_user(uploadedBy: str):
+    """Get all files uploaded by a specific user"""
+    table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+    response = table.query(
+        IndexName="UploadDateIndex",
+        KeyConditionExpression=Key('uploadedBy').eq(uploadedBy)
+    )
+    return {"files": response.get("Items", [])}
+
+@app.get("/files/status/{status}")
+async def get_files_by_status(status: str):
+    """Get all files with a specific status"""
+    table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+    response = table.query(
+        IndexName="StatusIndex",
+        KeyConditionExpression=Key('status').eq(status)
+    )
+    return {"files": response.get("Items", [])}
+
+@app.post("/files/metadata")
+async def save_file_metadata(fileData: dict):
+    """Save file metadata to DynamoDB using the new schema"""
+    table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+    
+    item = clean_for_dynamodb({
+        "fileId": fileData.get("fileKey"),  # Partition key
+        "uploadedBy": fileData.get("uploadedBy", "anonymous"),  # Sort key
+        "fileName": fileData.get("fileName"),
+        "fileType": fileData.get("fileType"),
+        "fileSize": fileData.get("fileSize"),
+        "s3Key": fileData.get("fileKey"),
+        "s3Url": fileData.get("url"),
+        "uploadDate": datetime.utcnow().isoformat(),
+        "status": "UPLOADED",
+        "metadata": fileData.get("metadata", {}),
+        "last_updated": datetime.utcnow().isoformat()
+    })
+    
+    try:
+        table.put_item(Item=item)
+        return {"message": "File metadata saved successfully", "fileId": item["fileId"]}
+    except Exception as e:
+        logger.error(f"Failed to save file metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save file metadata")
 
 @app.get("/health")
 async def health_check():

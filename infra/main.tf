@@ -133,10 +133,41 @@ resource "aws_iam_role_policy" "custom" {
 resource "aws_dynamodb_table" "docproc" {
   name         = "${local.app_name}-results"
   billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "id"
+  hash_key     = "fileId"
+  range_key    = "uploadedBy"
 
   attribute {
-    name = "id"
+    name = "fileId"
+    type = "S"
+  }
+
+  attribute {
+    name = "uploadedBy"
+    type = "S"
+  }
+
+  # Global Secondary Index for querying by status
+  global_secondary_index {
+    name            = "StatusIndex"
+    hash_key        = "status"
+    projection_type = "ALL"
+  }
+
+  attribute {
+    name = "status"
+    type = "S"
+  }
+
+  # Global Secondary Index for querying by uploadDate
+  global_secondary_index {
+    name            = "UploadDateIndex"
+    hash_key        = "uploadedBy"
+    range_key       = "uploadDate"
+    projection_type = "ALL"
+  }
+
+  attribute {
+    name = "uploadDate"
     type = "S"
   }
 
