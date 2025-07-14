@@ -24,7 +24,7 @@ docker rmi document-processor/document-processor:latest 2>/dev/null || true
 # Get account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 OLD_ECR="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/document-processor/document-processor"
-NEW_ECR="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$PROJECT_NAME/document-processor"
+NEW_ECR="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/document-processor/document-processor"
 
 # Remove old ECR tagged images
 docker rmi "$OLD_ECR:latest" 2>/dev/null || true

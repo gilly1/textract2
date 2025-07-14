@@ -189,7 +189,7 @@ resource "aws_dynamodb_table" "document_results" {
 
 # ECR Repository
 resource "aws_ecr_repository" "document_processor" {
-  name                 = "${var.project_name}/document-processor"
+  name                 = "document-processor/document-processor"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
