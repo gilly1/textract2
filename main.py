@@ -148,19 +148,43 @@ def convert_pdf_to_images(pdf_path: str, output_dir: str) -> List[str]:
 
 async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-    expression = "SET " + ", ".join(f"#{k} = :{k}" for k in updates)
-    names = {f"#{k}": k for k in updates}
-    values = {f":{k}": v for k, v in updates.items()}
+    
+    # Build expression parts
+    set_expressions = []
+    names = {}
+    values = {}
+    
+    # Handle each update field
+    for k, v in updates.items():
+        if k == "status":
+            # Use ExpressionAttributeNames for reserved keyword 'status'
+            set_expressions.append("#status = :status")
+            names["#status"] = "status"
+            values[":status"] = v
+        else:
+            # Regular fields
+            set_expressions.append(f"{k} = :{k}")
+            values[f":{k}"] = v
+    
+    # Add last_updated timestamp
+    set_expressions.append("last_updated = :last_updated")
     values[":last_updated"] = datetime.utcnow().isoformat()
-    names["#status"] = "status"
-    expression += ", last_updated = :last_updated"
-
-    table.update_item(
-        Key={"id": document_id},
-        UpdateExpression=expression,
-        ExpressionAttributeNames=names,
-        ExpressionAttributeValues=convert_float_to_decimal(values)
-    )
+    
+    # Build final expression
+    expression = "SET " + ", ".join(set_expressions)
+    
+    # Update item
+    update_params = {
+        "Key": {"id": document_id},
+        "UpdateExpression": expression,
+        "ExpressionAttributeValues": convert_float_to_decimal(values)
+    }
+    
+    # Only add ExpressionAttributeNames if we have any
+    if names:
+        update_params["ExpressionAttributeNames"] = names
+    
+    table.update_item(**update_params)
 
 async def process_document_background(record: DynamoDBRecord):
     try:
