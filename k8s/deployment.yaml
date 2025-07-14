@@ -17,16 +17,16 @@ spec:
       serviceAccountName: document-processor-sa
       containers:
       - name: document-processor
-        image: document-processor:latest
+        image: 105714714499.dkr.ecr.us-east-1.amazonaws.com/document-processor/document-processor:latest
         ports:
         - containerPort: 8080
         env:
         - name: AWS_DEFAULT_REGION
           value: "us-east-1"
         - name: DYNAMODB_TABLE_NAME
-          value: "dp714-results"
+          value: "document-processor-results"
         - name: S3_BUCKET_NAME
-          value: "dp714-documents"
+          value: "document-processor-documents"
         - name: PYTHONUNBUFFERED
           value: "1"
         resources:
