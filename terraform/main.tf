@@ -75,6 +75,9 @@ module "eks" {
   subnet_ids                     = module.vpc.private_subnets
   cluster_endpoint_public_access = true
 
+  # Enable IRSA (IAM Roles for Service Accounts)
+  enable_irsa = true
+
   # Use shorter names and disable name prefixes to avoid length issues
   iam_role_name            = "${var.project_name}-cluster-role"
   iam_role_use_name_prefix = false
