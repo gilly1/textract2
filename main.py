@@ -1,37 +1,35 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+import os
+import io
+import re
+import fitz
 import boto3
 import pytesseract
-import fitz  # PyMuPDF
-from pyzbar import pyzbar
-import cv2
+import tempfile
+import logging
+import requests
 import numpy as np
 from PIL import Image
-import io
-import tempfile
-import uuid
-import json
-import os
+from pyzbar.pyzbar import decode
+from bs4 import BeautifulSoup
 from datetime import datetime
-from typing import List, Dict, Any, Optional
-import logging
 from decimal import Decimal
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 
-# Configure logging
+# Setup
+app = FastAPI(title="Hybrid Document Processor", version="4.0.0")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Document Processor Service", version="1.0.0")
+# AWS setup
+AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "document-processor-results")
+s3_client = boto3.client("s3", region_name=AWS_REGION)
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 
-# Configuration from environment variables
-AWS_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
-DYNAMODB_TABLE_NAME = os.getenv('DYNAMODB_TABLE_NAME', 'document-processor-results')
+# ----------------------------- Models -----------------------------
 
-# AWS clients
-s3_client = boto3.client('s3', region_name=AWS_REGION)
-dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
-
-# Pydantic models
 class DynamoDBRecord(BaseModel):
     document_id: str
     bucket: str
@@ -39,8 +37,6 @@ class DynamoDBRecord(BaseModel):
     status: str
     file_type: str
     upload_date: Optional[str] = None
-    processed_date: Optional[str] = None
-    source: Optional[str] = None
 
 class ProcessingRequest(BaseModel):
     record: DynamoDBRecord
@@ -63,355 +59,189 @@ class ProcessingResult(BaseModel):
     validation_score: int
     errors: List[str]
     processed_date: str
+    invoice_fields: Dict[str, Any]
+    validated_qr_links: List[str]
+    invalid_qr_links: List[str]
 
-@app.post("/process")
-async def process_document(request: ProcessingRequest, background_tasks: BackgroundTasks):
-    """
-    Process a document based on DynamoDB record
-    Accepts a DynamoDB record and processes the referenced document in S3
-    """
-    record = request.record
-    
-    # Validate the record
-    if record.status != "pending":
-        raise HTTPException(status_code=400, detail="Document status must be 'pending'")
-    
-    if not all([record.bucket, record.key, record.document_id]):
-        raise HTTPException(status_code=400, detail="Missing required fields: bucket, key, document_id")
-    
-    # Start background processing
-    background_tasks.add_task(process_document_background, record)
-    
-    return {
-        "message": "Document processing started",
-        "document_id": record.document_id,
-        "status": "processing"
-    }
-
-async def process_document_background(record: DynamoDBRecord):
-    """Background task to process the document"""
-    try:
-        # Update status to processing
-        await update_dynamodb_status(record.document_id, "processing", {"current_step": "downloading"})
-        
-        # Download and process document
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Download file from S3
-            file_extension = record.key.split('.')[-1].lower()
-            file_path = f"{temp_dir}/document.{file_extension}"
-            s3_client.download_file(record.bucket, record.key, file_path)
-            
-            # Process based on file type
-            if record.file_type == "pdf":
-                # Convert PDF to images
-                await update_dynamodb_status(record.document_id, "processing", {"current_step": "converting"})
-                images = convert_pdf_to_images(file_path, temp_dir)
-            elif record.file_type == "image":
-                # Process image directly
-                await update_dynamodb_status(record.document_id, "processing", {"current_step": "processing_image"})
-                images = [file_path]  # Process the image file directly
-            else:
-                raise ValueError(f"Unsupported file type: {record.file_type}")
-            
-            # Process each image
-            await update_dynamodb_status(record.document_id, "processing", {"current_step": "extracting"})
-            qr_codes = []
-            ocr_results = []
-            
-            for i, image_path in enumerate(images):
-                page_num = i + 1
-                
-                # QR Code extraction
-                page_qr_codes = extract_qr_codes(image_path, page_num)
-                qr_codes.extend(page_qr_codes)
-                
-                # OCR text extraction
-                ocr_result = extract_text_ocr(image_path, page_num)
-                ocr_results.append(ocr_result)
-            
-            # Validation
-            await update_dynamodb_status(record.document_id, "processing", {"current_step": "validating"})
-            validation_result = validate_extraction_data(qr_codes, ocr_results)
-            
-            # Prepare final result
-            result = ProcessingResult(
-                document_id=record.document_id,
-                status="completed" if validation_result["score"] >= 50 else "failed",
-                qr_codes=qr_codes,
-                ocr_results=ocr_results,
-                validation_score=validation_result["score"],
-                errors=validation_result["errors"],
-                processed_date=datetime.utcnow().isoformat()
-            )
-            
-            # Update DynamoDB with final results
-            await update_dynamodb_final_result(result)
-            
-    except Exception as e:
-        logger.error(f"Error processing document {record.document_id}: {str(e)}")
-        await update_dynamodb_status(
-            record.document_id, 
-            "failed", 
-            {"error": str(e), "processed_date": datetime.utcnow().isoformat()}
-        )
-
-def convert_pdf_to_images(pdf_path: str, output_dir: str) -> List[str]:
-    """Convert PDF pages to images"""
-    image_paths = []
-    
-    try:
-        doc = fitz.open(pdf_path)
-        
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            
-            # Render page to image
-            mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
-            pix = page.get_pixmap(matrix=mat)
-            
-            # Save as PNG
-            image_path = f"{output_dir}/page_{page_num + 1}.png"
-            pix.save(image_path)
-            image_paths.append(image_path)
-        
-        doc.close()
-        
-    except Exception as e:
-        logger.error(f"Error converting PDF to images: {str(e)}")
-        raise
-    
-    return image_paths
-
-def extract_qr_codes(image_path: str, page_num: int) -> List[QRCode]:
-    """Extract QR codes from an image"""
-    qr_codes = []
-    
-    try:
-        # Load image
-        image = cv2.imread(image_path)
-        if image is None:
-            return qr_codes
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Detect QR codes
-        decoded_objects = pyzbar.decode(gray)
-        
-        for obj in decoded_objects:
-            qr_data = obj.data.decode('utf-8')
-            x, y, w, h = obj.rect
-            
-            qr_code = QRCode(
-                page=page_num,
-                data=qr_data,
-                position={"x": x, "y": y, "width": w, "height": h}
-            )
-            qr_codes.append(qr_code)
-            
-    except Exception as e:
-        logger.error(f"Error extracting QR codes from page {page_num}: {str(e)}")
-    
-    return qr_codes
-
-def extract_text_ocr(image_path: str, page_num: int) -> OCRResult:
-    """Extract text from an image using OCR"""
-    try:
-        # Load image
-        image = Image.open(image_path)
-        
-        # Configure tesseract
-        custom_config = r'--oem 3 --psm 6'
-        
-        # Extract text
-        extracted_text = pytesseract.image_to_string(image, config=custom_config).strip()
-        
-        # Get confidence score
-        try:
-            data = pytesseract.image_to_data(
-                image, 
-                output_type=pytesseract.Output.DICT,
-                config=custom_config
-            )
-            confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
-            avg_confidence = sum(confidences) / len(confidences) if confidences else 0
-        except:
-            avg_confidence = 0
-        
-        return OCRResult(
-            page=page_num,
-            text=extracted_text,
-            confidence=round(avg_confidence, 1)
-        )
-        
-    except Exception as e:
-        logger.error(f"Error extracting text from page {page_num}: {str(e)}")
-        return OCRResult(page=page_num, text="", confidence=0.0)
-
-def validate_extraction_data(qr_codes: List[QRCode], ocr_results: List[OCRResult]) -> Dict[str, Any]:
-    """Validate extracted data and calculate score"""
-    errors = []
-    score = 0
-    
-    # Validate QR codes
-    if qr_codes:
-        score += 30
-        for qr in qr_codes:
-            if len(qr.data) > 10:
-                score += 10
-    else:
-        errors.append("No QR codes detected")
-    
-    # Validate OCR results
-    all_text = " ".join([ocr.text for ocr in ocr_results if ocr.text])
-    avg_confidence = sum([ocr.confidence for ocr in ocr_results]) / len(ocr_results) if ocr_results else 0
-    
-    if all_text and len(all_text.strip()) > 0:
-        score += 20
-        
-        if avg_confidence > 70:
-            score += 20
-        elif avg_confidence > 50:
-            score += 10
-        else:
-            errors.append(f"Low OCR confidence: {avg_confidence:.1f}%")
-        
-        if len(all_text.strip()) > 50:
-            score += 10
-    else:
-        errors.append("No text extracted")
-    
-    # Business logic validation
-    if all_text:
-        required_patterns = ['date', 'amount', 'total', 'invoice']
-        found_patterns = [pattern for pattern in required_patterns 
-                         if pattern.lower() in all_text.lower()]
-        
-        if found_patterns:
-            score += len(found_patterns) * 5
-        else:
-            errors.append("Missing required document patterns")
-    
-    return {
-        "score": min(score, 100),
-        "errors": errors
-    }
-
-async def update_dynamodb_status(document_id: str, status: str, additional_data: Dict = None):
-    """Update document status in DynamoDB"""
-    try:
-        table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-        
-        update_data = {
-            "status": status,
-            "last_updated": datetime.utcnow().isoformat()
-        }
-        
-        if additional_data:
-            update_data.update(additional_data)
-        
-        # Build update expression with attribute names for reserved keywords
-        update_expression = "SET "
-        expression_values = {}
-        expression_names = {}
-        
-        for key, value in update_data.items():
-            if key == "status":
-                # Use attribute name for reserved keyword
-                update_expression += f"#status = :status, "
-                expression_names["#status"] = "status"
-                expression_values[":status"] = value
-            else:
-                update_expression += f"{key} = :{key}, "
-                expression_values[f":{key}"] = value
-        
-        update_expression = update_expression.rstrip(", ")
-        
-        # Prepare update arguments
-        update_args = {
-            "Key": {"id": document_id},  # Use 'id' as the key
-            "UpdateExpression": update_expression,
-            "ExpressionAttributeValues": expression_values
-        }
-        
-        if expression_names:
-            update_args["ExpressionAttributeNames"] = expression_names
-        
-        table.update_item(**update_args)
-        
-    except Exception as e:
-        logger.error(f"Error updating DynamoDB status: {str(e)}")
+# -------------------------- Utilities ----------------------------
 
 def convert_float_to_decimal(obj):
-    """Convert float values to Decimal for DynamoDB compatibility"""
     if isinstance(obj, list):
-        return [convert_float_to_decimal(item) for item in obj]
+        return [convert_float_to_decimal(i) for i in obj]
     elif isinstance(obj, dict):
-        return {key: convert_float_to_decimal(value) for key, value in obj.items()}
+        return {k: convert_float_to_decimal(v) for k, v in obj.items()}
     elif isinstance(obj, float):
         return Decimal(str(obj))
     else:
         return obj
 
-async def update_dynamodb_final_result(result: ProcessingResult):
-    """Update DynamoDB with final processing results"""
+def extract_invoice_fields(text: str) -> Dict[str, Any]:
+    def find(pattern, flags=0, group=1):
+        match = re.search(pattern, text, flags)
+        return match.group(group).strip() if match else "Not found"
+
+    fields = {
+        "Invoice Number": find(r'INVOICE\s*(?:NO|NUMBER)[:\s]+([A-Z0-9/]+)', re.IGNORECASE),
+        "Invoice Date": find(r'Date\s*:\s*([0-9]{2}/[0-9]{2}/[0-9]{4})'),
+        "Total Amount Due": find(r'Total\s*KSh\s*([\d,\.]+)'),
+        "Currency": "KES" if "KSh" in text or "KES" in text else "Not found",
+        "Purchase Order Number": find(r'Purchase Order Number\s*[:\-]?\s*([A-Z0-9\-]+)', re.IGNORECASE)
+    }
+    return fields
+
+def check_qr_links(qr_links: List[str], invoice_fields: Dict[str, Any]) -> (List[str], List[str]):
+    valid, invalid = [], []
+    expected_invoice = invoice_fields.get("Invoice Number", "").lower()
+
+    for link in qr_links:
+        try:
+            r = requests.get(link, timeout=10)
+            text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True).lower()
+            if expected_invoice and expected_invoice in text:
+                valid.append(link)
+            else:
+                invalid.append(link)
+        except Exception as e:
+            invalid.append(f"{link} - Error: {e}")
+    return valid, invalid
+
+def extract_qr_codes(image: Image.Image, page_num: int) -> List[QRCode]:
+    gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+    decoded = decode(gray)
+    result = []
+
+    for obj in decoded:
+        qr_data = obj.data.decode('utf-8')
+        x, y, w, h = obj.rect
+        result.append(QRCode(
+            page=page_num,
+            data=qr_data,
+            position={"x": x, "y": y, "width": w, "height": h}
+        ))
+    return result
+
+def extract_text_ocr(image: Image.Image, page_num: int) -> OCRResult:
+    custom_config = r'--oem 3 --psm 6'
+    text = pytesseract.image_to_string(image, config=custom_config).strip()
+    
     try:
-        table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-        
-        # Convert float values to Decimal
-        qr_codes_data = convert_float_to_decimal([qr.dict() for qr in result.qr_codes])
-        ocr_results_data = convert_float_to_decimal([ocr.dict() for ocr in result.ocr_results])
-        
-        table.update_item(
-            Key={"id": result.document_id},  # Use 'id' as the key
-            UpdateExpression="""
-                SET #status = :status,
-                    qr_codes = :qr_codes,
-                    ocr_results = :ocr_results,
-                    validation_score = :validation_score,
-                    validation_errors = :errors,
-                    processed_date = :processed_date,
-                    last_updated = :last_updated
-            """,
-            ExpressionAttributeNames={
-                "#status": "status"
-            },
-            ExpressionAttributeValues={
-                ":status": result.status,
-                ":qr_codes": qr_codes_data,
-                ":ocr_results": ocr_results_data,
-                ":validation_score": result.validation_score,
-                ":errors": result.errors,
-                ":processed_date": result.processed_date,
-                ":last_updated": datetime.utcnow().isoformat()
-            }
-        )
-        
+        data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, config=custom_config)
+        confidences = [int(conf) for conf in data['conf'] if conf != '-1']
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0
+    except:
+        avg_conf = 0
+    
+    return OCRResult(page=page_num, text=text, confidence=round(avg_conf, 1))
+
+def convert_pdf_to_images(pdf_path: str, output_dir: str) -> List[str]:
+    image_paths = []
+    doc = fitz.open(pdf_path)
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        path = os.path.join(output_dir, f"page_{i + 1}.png")
+        pix.save(path)
+        image_paths.append(path)
+    return image_paths
+
+# ----------------------- Background Processor ----------------------
+
+async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
+    table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+    expression = "SET " + ", ".join(f"#{k} = :{k}" for k in updates)
+    names = {f"#{k}": k for k in updates}
+    values = {f":{k}": v for k, v in updates.items()}
+    values[":last_updated"] = datetime.utcnow().isoformat()
+    names["#status"] = "status"
+    expression += ", last_updated = :last_updated"
+
+    table.update_item(
+        Key={"id": document_id},
+        UpdateExpression=expression,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=convert_float_to_decimal(values)
+    )
+
+async def process_document_background(record: DynamoDBRecord):
+    try:
+        await update_dynamodb(record.document_id, {"status": "processing", "current_step": "downloading"})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, os.path.basename(record.key))
+            s3_client.download_file(record.bucket, record.key, file_path)
+
+            if record.file_type == "pdf":
+                image_paths = convert_pdf_to_images(file_path, tmpdir)
+            elif record.file_type == "image":
+                image_paths = [file_path]
+            else:
+                raise ValueError("Unsupported file type")
+
+            qr_codes, ocr_results, all_text = [], [], ""
+            for i, path in enumerate(image_paths):
+                image = Image.open(path)
+                qr_codes += extract_qr_codes(image, i + 1)
+                ocr = extract_text_ocr(image, i + 1)
+                ocr_results.append(ocr)
+                all_text += "\n" + ocr.text
+
+            await update_dynamodb(record.document_id, {"current_step": "validating"})
+
+            invoice_fields = extract_invoice_fields(all_text)
+            qr_data_list = [qr.data for qr in qr_codes]
+            valid_links, invalid_links = check_qr_links(qr_data_list, invoice_fields)
+            score = 80 if invoice_fields.get("Invoice Number") != "Not found" else 40
+
+            result = ProcessingResult(
+                document_id=record.document_id,
+                status="completed" if score >= 50 else "failed",
+                qr_codes=qr_codes,
+                ocr_results=ocr_results,
+                validation_score=score,
+                errors=[] if score >= 50 else ["Missing Invoice Number"],
+                processed_date=datetime.utcnow().isoformat(),
+                invoice_fields=invoice_fields,
+                validated_qr_links=valid_links,
+                invalid_qr_links=invalid_links
+            )
+
+            await update_dynamodb(record.document_id, {
+                "status": result.status,
+                "qr_codes": [q.dict() for q in result.qr_codes],
+                "ocr_results": [o.dict() for o in result.ocr_results],
+                "validation_score": result.validation_score,
+                "validation_errors": result.errors,
+                "processed_date": result.processed_date,
+                "invoice_fields": result.invoice_fields,
+                "validated_qr_links": result.validated_qr_links,
+                "invalid_qr_links": result.invalid_qr_links
+            })
+
     except Exception as e:
-        logger.error(f"Error updating final result in DynamoDB: {str(e)}")
+        logger.error(f"Error processing {record.document_id}: {e}")
+        await update_dynamodb(record.document_id, {
+            "status": "failed",
+            "error": str(e),
+            "processed_date": datetime.utcnow().isoformat()
+        })
+
+# ----------------------------- API Routes -----------------------------
+
+@app.post("/process")
+async def process_document(request: ProcessingRequest, background_tasks: BackgroundTasks):
+    record = request.record
+    if record.status != "pending":
+        raise HTTPException(status_code=400, detail="Document status must be 'pending'")
+    background_tasks.add_task(process_document_background, record)
+    return {"message": "Processing started", "document_id": record.document_id}
+
+@app.get("/status/{document_id}")
+async def get_status(document_id: str):
+    table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+    response = table.get_item(Key={"id": document_id})
+    if "Item" not in response:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return response["Item"]
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "document-processor"}
-
-@app.get("/status/{document_id}")
-async def get_document_status(document_id: str):
-    """Get processing status of a document"""
-    try:
-        table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-        
-        response = table.get_item(Key={"id": document_id})  # Use 'id' as the key
-        
-        if "Item" not in response:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        return response["Item"]
-        
-    except Exception as e:
-        logger.error(f"Error getting document status: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error retrieving document status")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    return {"status": "healthy", "service": "hybrid-document-processor"}

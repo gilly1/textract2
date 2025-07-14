@@ -1,13 +1,12 @@
-# Use official Python runtime as base image
+# Use slim Python base image
 FROM python:3.12-slim
 
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies for OpenCV, Tesseract, and other libraries
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
-    tesseract-ocr-eng \
     libzbar0 \
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -20,29 +19,27 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
+# Copy only requirements first for better caching
 COPY requirements.txt .
 
-# Upgrade pip and install setuptools first
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Install Python packages
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
+# Copy the rest of the application
 COPY main.py .
 
-# Create non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-RUN chown -R appuser:appuser /app
+# Create a non-root user
+RUN groupadd -r appuser && useradd -r -g appuser appuser \
+    && chown -R appuser:appuser /app
 USER appuser
 
-# Expose port
+# Expose API port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+# Healthcheck for container monitoring
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Run the application
+# Command to run the app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
