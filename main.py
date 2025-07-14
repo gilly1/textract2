@@ -3,6 +3,7 @@ import io
 import re
 import fitz
 import boto3
+import cv2
 import pytesseract
 import tempfile
 import logging
@@ -89,7 +90,7 @@ def extract_invoice_fields(text: str) -> Dict[str, Any]:
     }
     return fields
 
-def check_qr_links(qr_links: List[str], invoice_fields: Dict[str, Any]) -> (List[str], List[str]):
+def check_qr_links(qr_links: List[str], invoice_fields: Dict[str, Any]) -> tuple[List[str], List[str]]:
     valid, invalid = [], []
     expected_invoice = invoice_fields.get("Invoice Number", "").lower()
 
