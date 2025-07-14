@@ -222,7 +222,12 @@ resource "aws_lb_listener" "http" {
 # CloudWatch Log Group for ECS
 resource "aws_cloudwatch_log_group" "ecs_logs" {
   name              = "/ecs/${local.app_name}"
-  retention_in_days = 7
+  retention_in_days = 14  # Increased from 7 to 14 days
+  
+  tags = {
+    Environment = local.environment
+    Service     = "ECS"
+  }
 }
 
 resource "aws_ecs_task_definition" "app" {
@@ -486,4 +491,12 @@ output "ecs_cluster_name" {
 
 output "ecs_service_name" {
   value = aws_ecs_service.app.name
+}
+
+output "ecs_log_group_name" {
+  value = aws_cloudwatch_log_group.ecs_logs.name
+}
+
+output "lambda_log_group_name" {
+  value = aws_cloudwatch_log_group.lambda_logs.name
 }
