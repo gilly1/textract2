@@ -143,16 +143,35 @@ def call_process_endpoint(document_record: Dict[str, Any]) -> Dict[str, Any]:
     if not ECS_SERVICE_URL:
         raise ValueError("ECS_SERVICE_URL environment variable not set")
     
+    # Prepare a clean record that matches the ECS DynamoDBRecord model
+    # Ensure all required fields are present and properly formatted
+    clean_record = {
+        'fileId': document_record['fileId'],
+        'uploadedBy': document_record['uploadedBy'],
+        'fileName': document_record.get('fileName', ''),
+        'fileType': document_record.get('fileType', ''),
+        'fileSize': document_record.get('fileSize'),
+        's3Key': document_record.get('s3Key', ''),
+        's3Url': document_record.get('s3Url', ''),
+        'uploadDate': document_record.get('uploadDate', ''),
+        'status': document_record['status'],
+        'metadata': document_record.get('metadata', {}),
+        # Include legacy fields for backward compatibility
+        'document_id': document_record.get('document_id', document_record['fileId']),
+        'bucket': document_record.get('bucket', ''),
+        'key': document_record.get('key', document_record.get('s3Key', ''))
+    }
+    
     # Prepare the request payload
     payload = {
-        'record': document_record
+        'record': clean_record
     }
     
     # Make the HTTP request to the ECS service
     process_url = f"{ECS_SERVICE_URL.rstrip('/')}/process"
     
     logger.info(f"Calling process endpoint: {process_url}")
-    logger.info(f"Payload: {json.dumps(payload)}")
+    logger.info(f"Clean record payload: {json.dumps(clean_record)}")
     
     headers = {
         'Content-Type': 'application/json'
