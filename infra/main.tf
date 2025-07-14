@@ -285,22 +285,25 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Archive Lambda function code
+# Archive Lambda function code with dependencies
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../lambda"
-  output_path = "${path.module}/lambda_function.zip"
+  output_path = "${path.module}/lambda_function_temp.zip"
+  
+  # This is a temporary archive, we'll use the pre-built one
+  excludes = ["__pycache__", "*.pyc"]
 }
 
 # Lambda function
 resource "aws_lambda_function" "dynamodb_trigger" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/../lambda_function.zip"
   function_name    = "${local.app_name}-dynamodb-trigger"
   role            = aws_iam_role.lambda_role.arn
   handler         = "dynamodb_trigger.lambda_handler"
   runtime         = "python3.11"
   timeout         = 60
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/../lambda_function.zip")
 
   environment {
     variables = {
