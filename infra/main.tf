@@ -86,6 +86,28 @@ resource "aws_iam_role_policy_attachment" "execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Additional CloudWatch logs permissions for ECS execution role
+resource "aws_iam_role_policy" "ecs_logs" {
+  name = "ecsLogsPolicy"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "arn:aws:logs:*:*:*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "custom" {
   name = "ecsTaskAccessPolicy"
   role = aws_iam_role.ecs_task.id
@@ -166,6 +188,12 @@ resource "aws_lb_listener" "http" {
   }
 }
 
+# CloudWatch Log Group for ECS
+resource "aws_cloudwatch_log_group" "ecs_logs" {
+  name              = "/ecs/${local.app_name}"
+  retention_in_days = 7
+}
+
 resource "aws_ecs_task_definition" "app" {
   family                   = "${local.app_name}-task"
   network_mode             = "awsvpc"
@@ -187,6 +215,14 @@ resource "aws_ecs_task_definition" "app" {
       { name = "DYNAMODB_TABLE_NAME", value = aws_dynamodb_table.docproc.name },
       { name = "AWS_DEFAULT_REGION", value = "us-east-1" }
     ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.ecs_logs.name
+        "awslogs-region"        = "us-east-1"
+        "awslogs-stream-prefix" = "ecs"
+      }
+    }
   }])
 }
 
