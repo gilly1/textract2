@@ -15,6 +15,7 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import logging
+from decimal import Decimal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -328,7 +329,7 @@ async def update_dynamodb_status(document_id: str, status: str, additional_data:
         
         # Prepare update arguments
         update_args = {
-            "Key": {"document_id": document_id},
+            "Key": {"id": document_id},  # Use 'id' as the key
             "UpdateExpression": update_expression,
             "ExpressionAttributeValues": expression_values
         }
@@ -341,13 +342,28 @@ async def update_dynamodb_status(document_id: str, status: str, additional_data:
     except Exception as e:
         logger.error(f"Error updating DynamoDB status: {str(e)}")
 
+def convert_float_to_decimal(obj):
+    """Convert float values to Decimal for DynamoDB compatibility"""
+    if isinstance(obj, list):
+        return [convert_float_to_decimal(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {key: convert_float_to_decimal(value) for key, value in obj.items()}
+    elif isinstance(obj, float):
+        return Decimal(str(obj))
+    else:
+        return obj
+
 async def update_dynamodb_final_result(result: ProcessingResult):
     """Update DynamoDB with final processing results"""
     try:
         table = dynamodb.Table(DYNAMODB_TABLE_NAME)
         
+        # Convert float values to Decimal
+        qr_codes_data = convert_float_to_decimal([qr.dict() for qr in result.qr_codes])
+        ocr_results_data = convert_float_to_decimal([ocr.dict() for ocr in result.ocr_results])
+        
         table.update_item(
-            Key={"document_id": result.document_id},
+            Key={"id": result.document_id},  # Use 'id' as the key
             UpdateExpression="""
                 SET #status = :status,
                     qr_codes = :qr_codes,
@@ -362,8 +378,8 @@ async def update_dynamodb_final_result(result: ProcessingResult):
             },
             ExpressionAttributeValues={
                 ":status": result.status,
-                ":qr_codes": [qr.dict() for qr in result.qr_codes],
-                ":ocr_results": [ocr.dict() for ocr in result.ocr_results],
+                ":qr_codes": qr_codes_data,
+                ":ocr_results": ocr_results_data,
                 ":validation_score": result.validation_score,
                 ":errors": result.errors,
                 ":processed_date": result.processed_date,
@@ -385,7 +401,7 @@ async def get_document_status(document_id: str):
     try:
         table = dynamodb.Table(DYNAMODB_TABLE_NAME)
         
-        response = table.get_item(Key={"document_id": document_id})
+        response = table.get_item(Key={"id": document_id})  # Use 'id' as the key
         
         if "Item" not in response:
             raise HTTPException(status_code=404, detail="Document not found")
