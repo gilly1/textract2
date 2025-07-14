@@ -72,12 +72,33 @@ class ProcessingResult(BaseModel):
 # -------------------------- Utilities ----------------------------
 
 def convert_float_to_decimal(obj):
-    if isinstance(obj, list):
+    if obj is None:
+        return None
+    elif isinstance(obj, list):
         return [convert_float_to_decimal(i) for i in obj]
     elif isinstance(obj, dict):
         return {k: convert_float_to_decimal(v) for k, v in obj.items()}
     elif isinstance(obj, float):
         return Decimal(str(obj))
+    else:
+        return obj
+
+def clean_for_dynamodb(obj):
+    """Clean object for DynamoDB storage - removes None values and ensures proper types."""
+    if obj is None:
+        return None
+    elif isinstance(obj, list):
+        return [clean_for_dynamodb(i) for i in obj if i is not None]
+    elif isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            if v is not None:
+                cleaned[k] = clean_for_dynamodb(v)
+        return cleaned
+    elif isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, str) and obj.strip() == "":
+        return None
     else:
         return obj
 
@@ -432,19 +453,36 @@ async def process_document_background(record: DynamoDBRecord):
                 ocr_summary=ocr_summary
             )
 
-            await update_dynamodb(record.document_id, {
+            # Prepare clean data for DynamoDB storage
+            clean_ocr_results = []
+            for o in result.ocr_results:
+                clean_result = {
+                    "page": o.page,
+                    "text": o.text,
+                    "confidence": o.confidence
+                }
+                if o.raw_text:
+                    clean_result["raw_text"] = o.raw_text
+                if o.word_count:
+                    clean_result["word_count"] = o.word_count
+                if o.line_count:
+                    clean_result["line_count"] = o.line_count
+                if o.word_details:
+                    clean_result["word_details"] = o.word_details
+                clean_ocr_results.append(clean_result)
+
+            await update_dynamodb(record.document_id, clean_for_dynamodb({
                 "status": result.status,
                 "qr_codes": [q.dict() for q in result.qr_codes],
-                "ocr_results": [o.dict() for o in result.ocr_results],
+                "ocr_results": clean_ocr_results,
                 "ocr_summary": result.ocr_summary,
                 "validation_score": result.validation_score,
                 "validation_errors": result.errors,
                 "processed_date": result.processed_date,
                 "invoice_fields": result.invoice_fields,
                 "validated_qr_links": result.validated_qr_links,
-                "invalid_qr_links": result.invalid_qr_links,
-                "ocr_summary": result.ocr_summary  # Save summary to DB
-            })
+                "invalid_qr_links": result.invalid_qr_links
+            }))
 
     except Exception as e:
         logger.error(f"Error processing {record.document_id}: {e}")
