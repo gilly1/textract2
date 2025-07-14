@@ -49,7 +49,7 @@ echo -e "${GREEN}Testing document processing endpoint...${NC}"
 TEST_PAYLOAD='{
     "record": {
         "document_id": "test-doc-'$(date +%s)'",
-        "bucket": "test-bucket",
+        "bucket": "document-processor-documents",
         "key": "test-document.pdf",
         "status": "pending",
         "file_type": "pdf",

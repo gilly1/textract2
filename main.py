@@ -309,21 +309,34 @@ async def update_dynamodb_status(document_id: str, status: str, additional_data:
         if additional_data:
             update_data.update(additional_data)
         
-        # Build update expression
+        # Build update expression with attribute names for reserved keywords
         update_expression = "SET "
         expression_values = {}
+        expression_names = {}
         
         for key, value in update_data.items():
-            update_expression += f"{key} = :{key}, "
-            expression_values[f":{key}"] = value
+            if key == "status":
+                # Use attribute name for reserved keyword
+                update_expression += f"#status = :status, "
+                expression_names["#status"] = "status"
+                expression_values[":status"] = value
+            else:
+                update_expression += f"{key} = :{key}, "
+                expression_values[f":{key}"] = value
         
         update_expression = update_expression.rstrip(", ")
         
-        table.update_item(
-            Key={"document_id": document_id},
-            UpdateExpression=update_expression,
-            ExpressionAttributeValues=expression_values
-        )
+        # Prepare update arguments
+        update_args = {
+            "Key": {"document_id": document_id},
+            "UpdateExpression": update_expression,
+            "ExpressionAttributeValues": expression_values
+        }
+        
+        if expression_names:
+            update_args["ExpressionAttributeNames"] = expression_names
+        
+        table.update_item(**update_args)
         
     except Exception as e:
         logger.error(f"Error updating DynamoDB status: {str(e)}")
