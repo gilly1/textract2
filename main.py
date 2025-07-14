@@ -51,6 +51,10 @@ class OCRResult(BaseModel):
     page: int
     text: str
     confidence: float
+    raw_text: Optional[str] = None
+    word_count: Optional[int] = None
+    line_count: Optional[int] = None
+    word_details: Optional[List[Dict[str, Any]]] = None
 
 class ProcessingResult(BaseModel):
     document_id: str
@@ -63,6 +67,7 @@ class ProcessingResult(BaseModel):
     invoice_fields: Dict[str, Any]
     validated_qr_links: List[str]
     invalid_qr_links: List[str]
+    ocr_summary: Optional[Dict[str, Any]] = None
 
 # -------------------------- Utilities ----------------------------
 
@@ -81,13 +86,91 @@ def extract_invoice_fields(text: str) -> Dict[str, Any]:
         match = re.search(pattern, text, flags)
         return match.group(group).strip() if match else "Not found"
 
-    fields = {
-        "Invoice Number": find(r'INVOICE\s*(?:NO|NUMBER)[:\s]+([A-Z0-9/]+)', re.IGNORECASE),
-        "Invoice Date": find(r'Date\s*:\s*([0-9]{2}/[0-9]{2}/[0-9]{4})'),
-        "Total Amount Due": find(r'Total\s*KSh\s*([\d,\.]+)'),
-        "Currency": "KES" if "KSh" in text or "KES" in text else "Not found",
-        "Purchase Order Number": find(r'Purchase Order Number\s*[:\-]?\s*([A-Z0-9\-]+)', re.IGNORECASE)
-    }
+    def find_multiline(label, text, max_lines=5):
+        """
+        Finds the field by label, collects value after ':', and grabs the following lines 
+        until a blank, a separator, or the next field label (i.e., any line ending with colon).
+        """
+        lines = text.splitlines()
+        found = False
+        values = []
+        for idx, line in enumerate(lines):
+            # Find the label
+            if not found and line.strip().startswith(label):
+                after_colon = line.split(':', 1)[1].strip() if ':' in line else ''
+                values.append(after_colon)
+                found = True
+                continue
+            if found:
+                # Stop at: blank, separator, or a line that ends with a colon (i.e., new label)
+                if (not line.strip() or 
+                    re.match(r'^[- ]+$', line.strip()) or 
+                    re.match(r'.+:$', line.strip())):
+                    break
+                values.append(line.strip())
+                if len(values) >= max_lines:
+                    break
+        if values:
+            return ''.join(values).replace(' ', '').replace('\n', '')
+        return "Not found"
+
+    fields = {}
+
+    fields['Invoice Number'] = find(r'INVOICE NO[:\s]+([A-Z0-9/]+)')
+    fields['Invoice Date'] = find(r'Date\s*:\s*([0-9]{2}/[0-9]{2}/[0-9]{4}(?:\s[0-9:]+)?)')
+    fields['Due Date'] = find(r'Due Date\s*:\s*([0-9]{2}/[0-9]{2}/[0-9]{4})')
+
+    # Customer (Buyer) Info
+    inv_to = re.search(r'INVOICE TO\s+PIN:\s*([A-Z0-9]+)\s+NAME:\s*([A-Z0-9 \-]+)', text)
+    fields['Customer/Buyer PIN'] = inv_to.group(1).strip() if inv_to else "Not found"
+    fields['Customer/Buyer Name'] = inv_to.group(2).strip() if inv_to else "Not found"
+
+    # Supplier (Vendor) Info
+    inv_from = re.search(r'INVOICE FROM\s+PIN:\s*([A-Z0-9]+)\s+NAME:\s*([A-Z0-9 \-]+)', text)
+    fields['Supplier/Vendor PIN'] = inv_from.group(1).strip() if inv_from else "Not found"
+    fields['Supplier/Vendor Name'] = inv_from.group(2).strip() if inv_from else "Not found"
+
+    # Addresses (if present)
+    fields['Supplier Address'] = find(r'INVOICE FROM.*?ADDRESS[:\s]+([A-Z0-9 ,\-]+)', re.DOTALL)
+    fields['Customer Address'] = find(r'INVOICE TO.*?ADDRESS[:\s]+([A-Z0-9 ,\-]+)', re.DOTALL)
+
+    # Line Items Array Extraction
+    line_item_pattern = re.compile(
+        r'([A-Z0-9]+)\s+([A-Za-z ]+?)\s+(\d+)\s+x\s+([\d,\.]+)\s+(\d+%)\s+([\d,\.]+)\s+([\d,\.]+)\s+([\d,\.]+)',
+        re.MULTILINE
+    )
+    items = []
+    for m in line_item_pattern.finditer(text):
+        item = {
+            "Item Code": m.group(1),
+            "Description": m.group(2).strip(),
+            "Quantity": m.group(3),
+            "Unit Price": m.group(4),
+            "Tax Rate": m.group(5),
+            "Subtotal": m.group(6),
+            "Tax Amount": m.group(7),
+            "Total": m.group(8)
+        }
+        items.append(item)
+    fields['Line Items'] = items
+
+    # Amounts and currency
+    fields['Subtotal Amount'] = find(r'Totals\s+KSh\s*([\d,\.]+)\s+KSh\s*[\d,\.]+\s+KSh\s*[\d,\.]+')
+    fields['Taxable Amount'] = find(r'Totals\s+KSh\s*([\d,\.]+)\s+KSh\s*[\d,\.]+\s+KSh\s*[\d,\.]+')
+    fields['VAT/Tax Amount'] = find(r'Tax\s*KSh\s*([\d,\.]+)')
+    fields['Total Amount Due'] = find(r'Total\s*KSh\s*([\d,\.]+)')
+    fields['Currency'] = "KES" if "KSh" in text or "KES" in text else "Not found"
+
+    # Payment Terms and PO
+    fields['Payment Terms'] = find(r'Payment Terms\s*:\s*([A-Za-z0-9 ]+)')
+    fields['Purchase Order Number'] = find(r'Purchase Order Number\s*[:\-]?\s*([A-Z0-9\-]+)', flags=re.IGNORECASE)
+
+    # SCU / CU and Internal Data (multi-line aware)
+    fields['Internal Data'] = find_multiline('Internal Data', text)
+    fields['Receipt Signature'] = find_multiline('Receipt Signature', text)
+    fields['SCU ID'] = find_multiline('SCU ID', text)
+    fields['CU INVOICE NO.'] = find_multiline('CU INVOICE NO.', text)
+
     return fields
 
 def check_qr_links(qr_links: List[str], invoice_fields: Dict[str, Any]) -> tuple[List[str], List[str]]:
@@ -123,16 +206,31 @@ def extract_qr_codes(image: Image.Image, page_num: int) -> List[QRCode]:
 
 def extract_text_ocr(image: Image.Image, page_num: int) -> OCRResult:
     custom_config = r'--oem 3 --psm 6'
-    text = pytesseract.image_to_string(image, config=custom_config).strip()
+    raw_text = pytesseract.image_to_string(image, config=custom_config).strip()
+    
+    # Format the text for better readability
+    formatted_text = format_ocr_text(raw_text)
     
     try:
         data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, config=custom_config)
         confidences = [int(conf) for conf in data['conf'] if conf != '-1']
         avg_conf = sum(confidences) / len(confidences) if confidences else 0
+        
+        # Extract word-level details for better analysis
+        word_details = extract_word_details(data)
     except:
         avg_conf = 0
+        word_details = []
     
-    return OCRResult(page=page_num, text=text, confidence=round(avg_conf, 1))
+    return OCRResult(
+        page=page_num, 
+        text=formatted_text, 
+        confidence=round(avg_conf, 1),
+        raw_text=raw_text,
+        word_count=len(formatted_text.split()),
+        line_count=len([line for line in formatted_text.split('\n') if line.strip()]),
+        word_details=word_details[:20]  # Limit to first 20 words for storage efficiency
+    )
 
 def convert_pdf_to_images(pdf_path: str, output_dir: str) -> List[str]:
     image_paths = []
@@ -143,6 +241,91 @@ def convert_pdf_to_images(pdf_path: str, output_dir: str) -> List[str]:
         pix.save(path)
         image_paths.append(path)
     return image_paths
+
+def format_ocr_text(raw_text: str) -> str:
+    """Format OCR text for better readability and structure."""
+    if not raw_text.strip():
+        return raw_text
+    
+    lines = raw_text.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        # Clean up extra spaces and normalize
+        cleaned = ' '.join(line.split())
+        if cleaned:
+            # Preserve important formatting patterns
+            if any(keyword in cleaned.upper() for keyword in ['INVOICE', 'TOTAL', 'DATE', 'AMOUNT']):
+                # Make important fields more prominent
+                cleaned = cleaned.upper() if len(cleaned) < 50 else cleaned
+            formatted_lines.append(cleaned)
+    
+    # Join with proper line breaks, removing excessive blank lines
+    result = '\n'.join(formatted_lines)
+    
+    # Clean up multiple consecutive newlines
+    while '\n\n\n' in result:
+        result = result.replace('\n\n\n', '\n\n')
+    
+    return result.strip()
+
+def extract_word_details(data: dict) -> List[Dict[str, Any]]:
+    """Extract word-level details from Tesseract OCR data."""
+    word_details = []
+    
+    for i in range(len(data['text'])):
+        word = data['text'][i].strip()
+        if word and data['conf'][i] != '-1':
+            detail = {
+                'word': word,
+                'confidence': int(data['conf'][i]),
+                'bbox': {
+                    'left': data['left'][i],
+                    'top': data['top'][i], 
+                    'width': data['width'][i],
+                    'height': data['height'][i]
+                }
+            }
+            word_details.append(detail)
+    
+    # Sort by confidence descending and return top words
+    word_details.sort(key=lambda x: x['confidence'], reverse=True)
+    return word_details
+
+def format_ocr_summary(ocr_results: List[OCRResult]) -> Dict[str, Any]:
+    """Create a formatted summary of OCR results."""
+    if not ocr_results:
+        return {"summary": "No OCR data available"}
+    
+    total_confidence = sum(result.confidence for result in ocr_results) / len(ocr_results)
+    total_words = sum(result.word_count or 0 for result in ocr_results)
+    total_lines = sum(result.line_count or 0 for result in ocr_results)
+    
+    # Get best and worst confidence pages
+    best_page = max(ocr_results, key=lambda x: x.confidence)
+    worst_page = min(ocr_results, key=lambda x: x.confidence)
+    
+    # Extract key text snippets (first 100 chars from each page)
+    text_snippets = []
+    for result in ocr_results:
+        snippet = result.text[:100] + "..." if len(result.text) > 100 else result.text
+        text_snippets.append(f"Page {result.page}: {snippet}")
+    
+    return {
+        "pages_processed": len(ocr_results),
+        "average_confidence": round(total_confidence, 1),
+        "total_words_extracted": total_words,
+        "total_lines_extracted": total_lines,
+        "best_quality_page": {"page": best_page.page, "confidence": best_page.confidence},
+        "worst_quality_page": {"page": worst_page.page, "confidence": worst_page.confidence},
+        "text_preview": text_snippets,
+        "quality_assessment": (
+            "Excellent" if total_confidence >= 90 else
+            "Good" if total_confidence >= 75 else
+            "Fair" if total_confidence >= 60 else
+            "Poor"
+        )
+    }
 
 # ----------------------- Background Processor ----------------------
 
@@ -232,6 +415,9 @@ async def process_document_background(record: DynamoDBRecord):
             valid_links, invalid_links = check_qr_links(qr_data_list, invoice_fields)
             score = 80 if invoice_fields.get("Invoice Number") != "Not found" else 40
 
+            # Create OCR summary for better presentation
+            ocr_summary = format_ocr_summary(ocr_results)
+
             result = ProcessingResult(
                 document_id=record.document_id,
                 status="completed" if score >= 50 else "failed",
@@ -242,19 +428,22 @@ async def process_document_background(record: DynamoDBRecord):
                 processed_date=datetime.utcnow().isoformat(),
                 invoice_fields=invoice_fields,
                 validated_qr_links=valid_links,
-                invalid_qr_links=invalid_links
+                invalid_qr_links=invalid_links,
+                ocr_summary=ocr_summary
             )
 
             await update_dynamodb(record.document_id, {
                 "status": result.status,
                 "qr_codes": [q.dict() for q in result.qr_codes],
                 "ocr_results": [o.dict() for o in result.ocr_results],
+                "ocr_summary": result.ocr_summary,
                 "validation_score": result.validation_score,
                 "validation_errors": result.errors,
                 "processed_date": result.processed_date,
                 "invoice_fields": result.invoice_fields,
                 "validated_qr_links": result.validated_qr_links,
-                "invalid_qr_links": result.invalid_qr_links
+                "invalid_qr_links": result.invalid_qr_links,
+                "ocr_summary": result.ocr_summary  # Save summary to DB
             })
 
     except Exception as e:
