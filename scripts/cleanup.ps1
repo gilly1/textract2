@@ -4,7 +4,7 @@ param(
     [string]$AWSRegion = "us-east-1"
 )
 
-$ProjectName = "document-processor"
+$ProjectName = "dp714"
 
 Write-Host "Cleaning up $ProjectName infrastructure..." -ForegroundColor Yellow
 
@@ -81,6 +81,9 @@ Write-Host "`n=== Step 4: Destroying Terraform Infrastructure ===" -ForegroundCo
 Push-Location terraform
 
 try {
+    Write-Host "Initializing Terraform..." -ForegroundColor Green
+    terraform init
+    
     Write-Host "Planning destruction..." -ForegroundColor Green
     terraform plan -destroy -out=destroy.tfplan
     

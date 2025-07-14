@@ -1,3 +1,4 @@
+agon\www\python\my_textract_3\scripts\deploy.sh
 #!/bin/bash
 
 # Deploy Infrastructure and Application
@@ -40,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Configuration
-PROJECT_NAME="docproc-714499"
+PROJECT_NAME="dp714"
 
 echo "Starting deployment of $PROJECT_NAME..."
 
@@ -93,12 +94,21 @@ echo -e "\n${CYAN}=== Step 1: Deploying Infrastructure ===${NC}"
 
 cd terraform
 
-# Check if terraform.tfvars exists
+# Create terraform.tfvars if it doesn't exist
 if [ ! -f "terraform.tfvars" ]; then
-    echo -e "${YELLOW}Creating terraform.tfvars from example...${NC}"
-    cp terraform.tfvars.example terraform.tfvars
-    echo -e "${YELLOW}Please edit terraform.tfvars with your specific values and run the script again.${NC}"
-    exit 1
+    echo -e "${YELLOW}Creating terraform.tfvars...${NC}"
+    cat > terraform.tfvars << EOF
+aws_region = "$AWS_REGION"
+project_name = "$PROJECT_NAME"
+environment = "prod"
+kubernetes_version = "1.28"
+
+# VPC Configuration
+vpc_cidr = "10.0.0.0/16"
+private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+public_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+EOF
+    echo -e "${GREEN}terraform.tfvars created with default values.${NC}"
 fi
 
 # Initialize Terraform
@@ -178,6 +188,37 @@ echo -e "  ${WHITE}ECR Repository: $ECR_REPO${NC}"
 echo -e "\n${GREEN}Kubectl Configuration:${NC}"
 KUBECTL_COMMAND=$(terraform output -raw configure_kubectl)
 echo -e "  ${WHITE}$KUBECTL_COMMAND${NC}"
+
+# Execute kubectl configuration
+echo "Configuring kubectl..."
+eval $KUBECTL_COMMAND
+
+# Check for kubectl authentication issues and fix them
+echo "Checking kubectl authentication..."
+if ! kubectl cluster-info >/dev/null 2>&1; then
+    echo -e "${YELLOW}Detected kubectl authentication issue, attempting to fix...${NC}"
+    
+    # Try to fix the apiVersion issue
+    KUBECONFIG_FILE="$HOME/.kube/config"
+    if [ -f "$KUBECONFIG_FILE" ]; then
+        # Backup the config
+        cp "$KUBECONFIG_FILE" "$KUBECONFIG_FILE.backup"
+        
+        # Replace v1alpha1 with v1beta1 if it exists
+        sed -i 's/client\.authentication\.k8s\.io\/v1alpha1/client.authentication.k8s.io\/v1beta1/g' "$KUBECONFIG_FILE"
+        
+        echo -e "${GREEN}Updated kubectl config authentication version${NC}"
+        
+        # Test connection again
+        if kubectl cluster-info >/dev/null 2>&1; then
+            echo -e "${GREEN}✅ kubectl authentication fixed${NC}"
+        else
+            echo -e "${YELLOW}❌ kubectl authentication still failing, restoring backup...${NC}"
+            # Restore backup
+            cp "$KUBECONFIG_FILE.backup" "$KUBECONFIG_FILE"
+        fi
+    fi
+fi
 
 cd ..
 

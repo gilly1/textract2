@@ -24,7 +24,9 @@ spec:
         - name: AWS_DEFAULT_REGION
           value: "us-east-1"
         - name: DYNAMODB_TABLE_NAME
-          value: "docproc-714499-results"
+          value: "dp714-results"
+        - name: S3_BUCKET_NAME
+          value: "dp714-documents"
         - name: PYTHONUNBUFFERED
           value: "1"
         resources:

@@ -173,6 +173,41 @@ Write-Host "`nKubectl Configuration:" -ForegroundColor Green
 $KubectlCommand = terraform output -raw configure_kubectl
 Write-Host "  $KubectlCommand" -ForegroundColor White
 
+# Execute kubectl configuration
+Write-Host "Configuring kubectl..." -ForegroundColor Yellow
+Invoke-Expression $KubectlCommand
+
+# Check for kubectl authentication issues and fix them
+Write-Host "Checking kubectl authentication..." -ForegroundColor Yellow
+$TestConnection = kubectl cluster-info 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Detected kubectl authentication issue, attempting to fix..." -ForegroundColor Yellow
+    
+    # Try to fix the apiVersion issue
+    $KubeconfigFile = "$env:USERPROFILE\.kube\config"
+    if (Test-Path $KubeconfigFile) {
+        # Backup the config
+        Copy-Item $KubeconfigFile "$KubeconfigFile.backup" -Force
+        
+        # Replace v1alpha1 with v1beta1
+        $Content = Get-Content $KubeconfigFile -Raw
+        $UpdatedContent = $Content -replace 'client\.authentication\.k8s\.io/v1alpha1', 'client.authentication.k8s.io/v1beta1'
+        $UpdatedContent | Set-Content $KubeconfigFile
+        
+        Write-Host "Updated kubectl config authentication version" -ForegroundColor Green
+        
+        # Test connection again
+        $TestConnection = kubectl cluster-info 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "✅ kubectl authentication fixed" -ForegroundColor Green
+        } else {
+            Write-Host "❌ kubectl authentication still failing, restoring backup..." -ForegroundColor Yellow
+            # Restore backup
+            Copy-Item "$KubeconfigFile.backup" $KubeconfigFile -Force
+        }
+    }
+}
+
 Pop-Location
 
 # Get service URL
