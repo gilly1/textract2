@@ -154,6 +154,9 @@ async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     names = {}
     values = {}
     
+    # Debug logging
+    logger.info(f"Updating DynamoDB for document {document_id} with updates: {updates}")
+    
     # Handle each update field
     for k, v in updates.items():
         if k == "status":
@@ -173,6 +176,11 @@ async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     # Build final expression
     expression = "SET " + ", ".join(set_expressions)
     
+    # Debug logging
+    logger.info(f"UpdateExpression: {expression}")
+    logger.info(f"ExpressionAttributeNames: {names}")
+    logger.info(f"ExpressionAttributeValues keys: {list(values.keys())}")
+    
     # Update item
     update_params = {
         "Key": {"id": document_id},
@@ -183,8 +191,16 @@ async def update_dynamodb(document_id: str, updates: Dict[str, Any]):
     # Only add ExpressionAttributeNames if we have any
     if names:
         update_params["ExpressionAttributeNames"] = names
+        logger.info("Added ExpressionAttributeNames to update_params")
+    else:
+        logger.info("No ExpressionAttributeNames needed")
     
-    table.update_item(**update_params)
+    try:
+        table.update_item(**update_params)
+        logger.info(f"Successfully updated DynamoDB for document {document_id}")
+    except Exception as e:
+        logger.error(f"DynamoDB update failed for document {document_id}: {str(e)}")
+        raise
 
 async def process_document_background(record: DynamoDBRecord):
     try:
