@@ -45,7 +45,6 @@ A FastAPI-based document processing service that extracts text and QR codes from
 - Docker installed
 - Terraform >= 1.0
 - Python 3.11+ (for Lambda function)
-- jq (optional, for JSON parsing in scripts)
 
 ## Quick Start
 
