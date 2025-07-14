@@ -143,26 +143,27 @@ def call_process_endpoint(document_record: Dict[str, Any]) -> Dict[str, Any]:
     if not ECS_SERVICE_URL:
         raise ValueError("ECS_SERVICE_URL environment variable not set")
     
-    # Prepare a clean record that matches the ECS DynamoDBRecord model
-    # Ensure all required fields are present and properly formatted
+    # Prepare a clean record that matches the ECS DynamoDBRecord model exactly
+    # All required fields: fileId, uploadedBy, fileName, fileType, s3Key, status
     clean_record = {
-        'fileId': document_record['fileId'],
-        'uploadedBy': document_record['uploadedBy'],
-        'fileName': document_record.get('fileName', ''),
-        'fileType': document_record.get('fileType', ''),
-        'fileSize': document_record.get('fileSize'),
-        's3Key': document_record.get('s3Key', ''),
-        's3Url': document_record.get('s3Url', ''),
-        'uploadDate': document_record.get('uploadDate', ''),
-        'status': document_record['status'],
-        'metadata': document_record.get('metadata', {}),
-        # Include legacy fields for backward compatibility
-        'document_id': document_record.get('document_id', document_record['fileId']),
-        'bucket': document_record.get('bucket', ''),
-        'key': document_record.get('key', document_record.get('s3Key', ''))
+        'fileId': str(document_record['fileId']),  # Ensure string
+        'uploadedBy': str(document_record['uploadedBy']),  # Ensure string
+        'fileName': str(document_record.get('fileName', '')),  # Required, default to empty string
+        'fileType': str(document_record.get('fileType', '')),  # Required, default to empty string
+        'fileSize': document_record.get('fileSize'),  # Optional int
+        's3Key': str(document_record.get('s3Key', '')),  # Required, ensure string
+        's3Url': document_record.get('s3Url'),  # Optional string
+        'uploadDate': document_record.get('uploadDate'),  # Optional string
+        'status': str(document_record['status']),  # Required, ensure string
+        'metadata': document_record.get('metadata', {}),  # Optional dict
+        # Legacy fields (optional)
+        'document_id': str(document_record.get('document_id', document_record['fileId'])),
+        'bucket': str(document_record.get('bucket', '')),
+        'key': str(document_record.get('key', document_record.get('s3Key', '')))
     }
     
-    # Prepare the request payload
+    # The FastAPI endpoint expects a ProcessingRequest with a 'record' field
+    # So we send the clean_record as the 'record' field
     payload = {
         'record': clean_record
     }
@@ -171,22 +172,38 @@ def call_process_endpoint(document_record: Dict[str, Any]) -> Dict[str, Any]:
     process_url = f"{ECS_SERVICE_URL.rstrip('/')}/process"
     
     logger.info(f"Calling process endpoint: {process_url}")
-    logger.info(f"Clean record payload: {json.dumps(clean_record)}")
+    logger.info(f"Payload structure: record with keys: {list(clean_record.keys())}")
+    logger.info(f"Record fileId: {clean_record['fileId']}, s3Key: {clean_record['s3Key']}")
     
     headers = {
         'Content-Type': 'application/json'
     }
     
-    response = requests.post(
-        process_url,
-        json=payload,
-        headers=headers,
-        timeout=30
-    )
-    
-    response.raise_for_status()
-    
-    result = response.json()
-    logger.info(f"Process endpoint response: {json.dumps(result)}")
-    
-    return result
+    try:
+        response = requests.post(
+            process_url,
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        logger.info(f"HTTP Status: {response.status_code}")
+        
+        if response.status_code == 422:
+            logger.error(f"Validation error (422): {response.text}")
+            logger.error(f"Sent payload: {json.dumps(payload, indent=2)}")
+            
+        response.raise_for_status()
+        
+        result = response.json()
+        logger.info(f"Process endpoint response: {json.dumps(result)}")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP Error: {e}")
+        logger.error(f"Response text: {response.text}")
+        raise
+    except Exception as e:
+        logger.error(f"Request failed: {e}")
+        raise
