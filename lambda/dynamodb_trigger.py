@@ -150,17 +150,39 @@ def call_process_endpoint(document_record: Dict[str, Any]) -> Dict[str, Any]:
         'uploadedBy': str(document_record['uploadedBy']),  # Ensure string
         'fileName': str(document_record.get('fileName', '')),  # Required, default to empty string
         'fileType': str(document_record.get('fileType', '')),  # Required, default to empty string
-        'fileSize': document_record.get('fileSize'),  # Optional int
         's3Key': str(document_record.get('s3Key', '')),  # Required, ensure string
-        's3Url': document_record.get('s3Url'),  # Optional string
-        'uploadDate': document_record.get('uploadDate'),  # Optional string
         'status': str(document_record['status']),  # Required, ensure string
-        'metadata': document_record.get('metadata', {}),  # Optional dict
-        # Legacy fields (optional)
-        'document_id': str(document_record.get('document_id', document_record['fileId'])),
-        'bucket': str(document_record.get('bucket', '')),
-        'key': str(document_record.get('key', document_record.get('s3Key', '')))
     }
+    
+    # Add optional fields only if they have values (not None)
+    file_size = document_record.get('fileSize')
+    if file_size is not None:
+        clean_record['fileSize'] = int(file_size)
+    
+    s3_url = document_record.get('s3Url')
+    if s3_url:
+        clean_record['s3Url'] = str(s3_url)
+    
+    upload_date = document_record.get('uploadDate')
+    if upload_date:
+        clean_record['uploadDate'] = str(upload_date)
+    
+    metadata = document_record.get('metadata')
+    if metadata:
+        clean_record['metadata'] = metadata
+    
+    # Legacy fields (optional) - only add if they have values
+    document_id = document_record.get('document_id', document_record['fileId'])
+    if document_id:
+        clean_record['document_id'] = str(document_id)
+    
+    bucket = document_record.get('bucket')
+    if bucket:
+        clean_record['bucket'] = str(bucket)
+    
+    key = document_record.get('key', document_record.get('s3Key'))
+    if key:
+        clean_record['key'] = str(key)
     
     # The FastAPI endpoint expects a ProcessingRequest with a 'record' field
     # So we send the clean_record as the 'record' field

@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import json
 import fitz
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -17,7 +18,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Setup
 app = FastAPI(title="Hybrid Document Processor", version="4.0.0")
@@ -614,3 +615,20 @@ async def save_file_metadata(fileData: dict):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "hybrid-document-processor"}
+
+@app.post("/debug-process")
+async def debug_process(request: dict):
+    """Debug endpoint to test request validation"""
+    logger.info(f"Debug process received: {json.dumps(request, indent=2)}")
+    
+    try:
+        # Try to validate the request
+        processing_request = ProcessingRequest(**request)
+        logger.info("✅ Request validation successful")
+        return {"status": "valid", "message": "Request is valid", "record": processing_request.record.dict()}
+    except ValidationError as e:
+        logger.error(f"❌ Validation error: {e}")
+        return {"status": "invalid", "validation_errors": e.errors(), "received_data": request}
+    except Exception as e:
+        logger.error(f"❌ Unexpected error: {e}")
+        return {"status": "error", "error": str(e), "received_data": request}
